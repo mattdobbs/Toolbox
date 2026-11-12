@@ -1,0 +1,770 @@
+//! Connections, credentials, providers and their on-disk store.
+//!
+//! The store is a single JSON document. Secrets never live here: they are in
+//! the vault, in 1Password, or prompted for.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+
+use crate::ad;
+use crate::error::CoreError;
+use crate::onepassword;
+
+const DOCUMENT_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+pub enum ConnectionKind {
+    Ssh,
+    Rdp,
+    Vnc,
+}
+
+impl ConnectionKind {
+    pub fn default_port(self) -> u16 {
+        match self {
+            ConnectionKind::Ssh => 22,
+            ConnectionKind::Rdp => 3389,
+            ConnectionKind::Vnc => 5900,
+        }
+    }
+}
+
+/// How a connection authenticates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+pub enum AuthKind {
+    /// Ask for a password every time.
+    Password,
+    /// A private key on disk. Passphrase is prompted for if needed.
+    KeyFile { path: String },
+    /// Any SSH agent: the system one, or 1Password's, by socket path.
+    Agent { socket_path: Option<String> },
+    /// A credential object: vault entry, 1Password item or prompt.
+    Credential { credential_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct Connection {
+    pub id: String,
+    pub name: String,
+    pub kind: ConnectionKind,
+    pub host: String,
+    pub port: u16,
+    /// Overrides the credential's username when non-empty.
+    pub username: String,
+    pub auth: AuthKind,
+    pub folder: Option<String>,
+    pub tags: Vec<String>,
+    /// Provider that generated this record, if any. Replaced on each sync.
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+/// Where a credential's secret lives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+pub enum CredentialKind {
+    /// Encrypted in the local vault under the credential's id.
+    Vault,
+    /// Fetched from 1Password with `op item get` when used.
+    OnePassword {
+        item_id: String,
+        account: Option<String>,
+        op_path: Option<String>,
+    },
+    /// Ask every time.
+    Prompt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct Credential {
+    pub id: String,
+    pub name: String,
+    pub username: String,
+    pub kind: CredentialKind,
+    pub folder: Option<String>,
+    /// Whether the secret includes an SSH private key.
+    pub has_private_key: bool,
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+/// A dynamic folder: something that generates connections or credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+pub enum ProviderKind {
+    OnePassword {
+        /// Path to `op`; auto-detected when empty.
+        op_path: Option<String>,
+        /// Account shorthand for `--account`; all accounts when empty.
+        account: Option<String>,
+        /// Vault names to include; all vaults when empty.
+        vaults: Vec<String>,
+    },
+    ActiveDirectory {
+        /// Domain controller host, e.g. `dc01.corp.example`.
+        server: String,
+        /// Search base DN, e.g. `DC=corp,DC=example`.
+        search_base: String,
+        /// Credential used to bind (your regular domain account).
+        bind_credential_id: Option<String>,
+        /// Assigned to computers under a Domain Controllers OU.
+        admin_credential_id: Option<String>,
+        /// Assigned to every other computer.
+        user_credential_id: Option<String>,
+        /// Fall back to unencrypted LDAP when LDAPS fails.
+        allow_plain_ldap: bool,
+        accept_invalid_certs: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct Provider {
+    pub id: String,
+    pub name: String,
+    pub kind: ProviderKind,
+    /// Folder the generated objects are placed under.
+    pub folder: String,
+    /// 0 disables automatic refresh.
+    pub auto_refresh_minutes: u32,
+    #[serde(default)]
+    pub last_sync_epoch: Option<u64>,
+    #[serde(default)]
+    pub last_status: Option<String>,
+}
+
+/// Bind credentials for a sync, resolved by the app beforehand.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct BindCredentials {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SyncResult {
+    pub provider_id: String,
+    pub connections: u32,
+    pub credentials: u32,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Document {
+    version: u32,
+    #[serde(default)]
+    connections: Vec<Connection>,
+    #[serde(default)]
+    credentials: Vec<Credential>,
+    #[serde(default)]
+    providers: Vec<Provider>,
+}
+
+#[derive(uniffi::Object)]
+pub struct ConnectionStore {
+    path: PathBuf,
+    doc: Mutex<Document>,
+}
+
+#[uniffi::export]
+impl ConnectionStore {
+    /// Opens (or creates) the store at `path`.
+    #[uniffi::constructor]
+    pub fn open(path: String) -> Result<Arc<Self>, CoreError> {
+        let path = PathBuf::from(path);
+        let doc = if path.exists() {
+            let text = fs::read_to_string(&path)?;
+            if text.trim().is_empty() {
+                Document::default()
+            } else {
+                serde_json::from_str(&text)?
+            }
+        } else {
+            Document::default()
+        };
+        Ok(Arc::new(Self {
+            path,
+            doc: Mutex::new(doc),
+        }))
+    }
+
+    // ----- connections -----
+
+    pub fn list(&self) -> Vec<Connection> {
+        self.doc.lock().unwrap().connections.clone()
+    }
+
+    pub fn get(&self, id: String) -> Option<Connection> {
+        self.doc.lock().unwrap().connections.iter().find(|c| c.id == id).cloned()
+    }
+
+    /// Inserts or replaces a connection. An empty `id` gets a fresh one.
+    pub fn upsert(&self, mut connection: Connection) -> Result<Connection, CoreError> {
+        if connection.name.trim().is_empty() {
+            return Err(CoreError::Invalid("name is required".into()));
+        }
+        if connection.host.trim().is_empty() {
+            return Err(CoreError::Invalid("host is required".into()));
+        }
+        if connection.id.trim().is_empty() {
+            connection.id = new_id();
+        }
+        let mut doc = self.doc.lock().unwrap();
+        match doc.connections.iter_mut().find(|c| c.id == connection.id) {
+            Some(existing) => *existing = connection.clone(),
+            None => doc.connections.push(connection.clone()),
+        }
+        sort_document(&mut doc);
+        write_document(&self.path, &doc)?;
+        Ok(connection)
+    }
+
+    pub fn delete(&self, id: String) -> Result<bool, CoreError> {
+        let mut doc = self.doc.lock().unwrap();
+        let before = doc.connections.len();
+        doc.connections.retain(|c| c.id != id);
+        let removed = doc.connections.len() != before;
+        if removed {
+            write_document(&self.path, &doc)?;
+        }
+        Ok(removed)
+    }
+
+    // ----- credentials -----
+
+    pub fn list_credentials(&self) -> Vec<Credential> {
+        self.doc.lock().unwrap().credentials.clone()
+    }
+
+    pub fn get_credential(&self, id: String) -> Option<Credential> {
+        self.doc.lock().unwrap().credentials.iter().find(|c| c.id == id).cloned()
+    }
+
+    pub fn upsert_credential(&self, mut credential: Credential) -> Result<Credential, CoreError> {
+        if credential.name.trim().is_empty() {
+            return Err(CoreError::Invalid("name is required".into()));
+        }
+        if let CredentialKind::OnePassword { item_id, .. } = &credential.kind {
+            if item_id.trim().is_empty() {
+                return Err(CoreError::Invalid("1Password item id is required".into()));
+            }
+        }
+        if credential.id.trim().is_empty() {
+            credential.id = new_id();
+        }
+        let mut doc = self.doc.lock().unwrap();
+        match doc.credentials.iter_mut().find(|c| c.id == credential.id) {
+            Some(existing) => *existing = credential.clone(),
+            None => doc.credentials.push(credential.clone()),
+        }
+        sort_document(&mut doc);
+        write_document(&self.path, &doc)?;
+        Ok(credential)
+    }
+
+    pub fn delete_credential(&self, id: String) -> Result<bool, CoreError> {
+        let mut doc = self.doc.lock().unwrap();
+        let before = doc.credentials.len();
+        doc.credentials.retain(|c| c.id != id);
+        let removed = doc.credentials.len() != before;
+        if removed {
+            write_document(&self.path, &doc)?;
+        }
+        Ok(removed)
+    }
+
+    /// Connections that reference a credential, for warnings before deleting it.
+    pub fn connections_using_credential(&self, id: String) -> Vec<Connection> {
+        self.doc
+            .lock()
+            .unwrap()
+            .connections
+            .iter()
+            .filter(|c| matches!(&c.auth, AuthKind::Credential { credential_id } if *credential_id == id))
+            .cloned()
+            .collect()
+    }
+
+    // ----- providers -----
+
+    pub fn list_providers(&self) -> Vec<Provider> {
+        self.doc.lock().unwrap().providers.clone()
+    }
+
+    pub fn get_provider(&self, id: String) -> Option<Provider> {
+        self.doc.lock().unwrap().providers.iter().find(|p| p.id == id).cloned()
+    }
+
+    pub fn upsert_provider(&self, mut provider: Provider) -> Result<Provider, CoreError> {
+        if provider.name.trim().is_empty() {
+            return Err(CoreError::Invalid("name is required".into()));
+        }
+        if let ProviderKind::ActiveDirectory { server, search_base, .. } = &provider.kind {
+            if server.trim().is_empty() {
+                return Err(CoreError::Invalid("LDAP server is required".into()));
+            }
+            if search_base.trim().is_empty() {
+                return Err(CoreError::Invalid("search base is required".into()));
+            }
+        }
+        if provider.folder.trim().is_empty() {
+            provider.folder = provider.name.trim().to_string();
+        }
+        if provider.id.trim().is_empty() {
+            provider.id = new_id();
+        }
+        let mut doc = self.doc.lock().unwrap();
+        match doc.providers.iter_mut().find(|p| p.id == provider.id) {
+            Some(existing) => {
+                // Keep sync bookkeeping unless the caller supplied it.
+                if provider.last_sync_epoch.is_none() {
+                    provider.last_sync_epoch = existing.last_sync_epoch;
+                    provider.last_status = existing.last_status.clone();
+                }
+                *existing = provider.clone();
+            }
+            None => doc.providers.push(provider.clone()),
+        }
+        sort_document(&mut doc);
+        write_document(&self.path, &doc)?;
+        Ok(provider)
+    }
+
+    /// Removes a provider and everything it generated.
+    pub fn delete_provider(&self, id: String) -> Result<bool, CoreError> {
+        let mut doc = self.doc.lock().unwrap();
+        let before = doc.providers.len();
+        doc.providers.retain(|p| p.id != id);
+        let removed = doc.providers.len() != before;
+        if removed {
+            doc.connections.retain(|c| c.source.as_deref() != Some(id.as_str()));
+            doc.credentials.retain(|c| c.source.as_deref() != Some(id.as_str()));
+            write_document(&self.path, &doc)?;
+        }
+        Ok(removed)
+    }
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl ConnectionStore {
+    /// Runs a provider and replaces what it generated last time.
+    /// Active Directory needs `bind`; 1Password ignores it.
+    pub async fn sync_provider(&self, id: String, bind: Option<BindCredentials>) -> Result<SyncResult, CoreError> {
+        let provider = self
+            .get_provider(id.clone())
+            .ok_or_else(|| CoreError::Invalid(format!("no provider with id {id}")))?;
+
+        let outcome = match &provider.kind {
+            ProviderKind::OnePassword { op_path, account, vaults } => {
+                match onepassword::find_op_path(op_path.as_deref()) {
+                    None => Err(CoreError::Invalid(
+                        "1Password CLI (op) not found; install it or set its path on the provider".into(),
+                    )),
+                    Some(path) => onepassword::list_items(&path, account.as_deref(), vaults)
+                        .await
+                        .map(|items| {
+                            let credentials = items_to_credentials(&provider, items, op_path.clone(), account.clone());
+                            (Vec::new(), credentials, Vec::new())
+                        }),
+                }
+            }
+            ProviderKind::ActiveDirectory {
+                server,
+                search_base,
+                admin_credential_id,
+                user_credential_id,
+                allow_plain_ldap,
+                accept_invalid_certs,
+                ..
+            } => match bind {
+                None => Err(CoreError::Auth("Active Directory sync needs a bind credential".into())),
+                Some(bind) => {
+                    let settings = ad::AdSettings {
+                        server: server.clone(),
+                        search_base: search_base.clone(),
+                        allow_plain_ldap: *allow_plain_ldap,
+                        accept_invalid_certs: *accept_invalid_certs,
+                    };
+                    let admin = admin_credential_id.as_ref().and_then(|id| self.get_credential(id.clone()));
+                    let user = user_credential_id.as_ref().and_then(|id| self.get_credential(id.clone()));
+                    ad::fetch_computers(&settings, &bind.username, &bind.password)
+                        .await
+                        .map(|(computers, warnings)| {
+                            let connections = ad::to_connections(&computers, &provider, admin.as_ref(), user.as_ref());
+                            (connections, Vec::new(), warnings)
+                        })
+                }
+            },
+        };
+
+        let now = epoch_now();
+        match outcome {
+            Ok((connections, credentials, warnings)) => {
+                let result = SyncResult {
+                    provider_id: id.clone(),
+                    connections: connections.len() as u32,
+                    credentials: credentials.len() as u32,
+                    warnings,
+                };
+                let status = match &provider.kind {
+                    ProviderKind::OnePassword { .. } => format!("{} credentials", result.credentials),
+                    ProviderKind::ActiveDirectory { .. } => format!("{} connections", result.connections),
+                };
+                let mut doc = self.doc.lock().unwrap();
+                doc.connections.retain(|c| c.source.as_deref() != Some(id.as_str()));
+                doc.credentials.retain(|c| c.source.as_deref() != Some(id.as_str()));
+                doc.connections.extend(connections);
+                doc.credentials.extend(credentials);
+                if let Some(p) = doc.providers.iter_mut().find(|p| p.id == id) {
+                    p.last_sync_epoch = Some(now);
+                    p.last_status = Some(status);
+                }
+                sort_document(&mut doc);
+                write_document(&self.path, &doc)?;
+                Ok(result)
+            }
+            Err(e) => {
+                let mut doc = self.doc.lock().unwrap();
+                if let Some(p) = doc.providers.iter_mut().find(|p| p.id == id) {
+                    p.last_status = Some(format!("failed: {e}"));
+                }
+                write_document(&self.path, &doc)?;
+                Err(e)
+            }
+        }
+    }
+}
+
+/// A fresh random identifier for a new record.
+#[uniffi::export]
+pub fn new_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// Credential records for 1Password items. Ids are stable across syncs so
+/// connections can keep referring to them.
+fn items_to_credentials(
+    provider: &Provider,
+    items: Vec<onepassword::OpItem>,
+    op_path: Option<String>,
+    account: Option<String>,
+) -> Vec<Credential> {
+    items
+        .into_iter()
+        .map(|item| {
+            let folder = match &item.vault {
+                Some(vault) if !vault.is_empty() => format!("{}/{}", provider.folder, vault),
+                _ => provider.folder.clone(),
+            };
+            let category = item.category.clone().unwrap_or_default();
+            Credential {
+                id: format!("{}:{}", provider.id, item.id),
+                name: item.title,
+                username: item.username.unwrap_or_default(),
+                kind: CredentialKind::OnePassword {
+                    item_id: item.id,
+                    account: account.clone(),
+                    op_path: op_path.clone(),
+                },
+                folder: Some(folder),
+                has_private_key: category.eq_ignore_ascii_case("SSH_KEY"),
+                tags: if category.is_empty() { Vec::new() } else { vec![category.to_lowercase()] },
+                source: Some(provider.id.clone()),
+            }
+        })
+        .collect()
+}
+
+fn epoch_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn sort_document(doc: &mut Document) {
+    let by_folder_name = |a: &Option<String>, b: &Option<String>, an: &str, bn: &str| {
+        a.cmp(b).then_with(|| an.to_lowercase().cmp(&bn.to_lowercase()))
+    };
+    doc.connections
+        .sort_by(|a, b| by_folder_name(&a.folder, &b.folder, &a.name, &b.name));
+    doc.credentials
+        .sort_by(|a, b| by_folder_name(&a.folder, &b.folder, &a.name, &b.name));
+    doc.providers
+        .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+}
+
+fn write_document(path: &Path, doc: &Document) -> Result<(), CoreError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let out = Document {
+        version: DOCUMENT_VERSION,
+        connections: doc.connections.clone(),
+        credentials: doc.credentials.clone(),
+        providers: doc.providers.clone(),
+    };
+    let text = serde_json::to_string_pretty(&out)?;
+    // Write to a sibling temp file then rename so a crash never truncates.
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, text)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn sample(name: &str) -> Connection {
+        Connection {
+            id: String::new(),
+            name: name.into(),
+            kind: ConnectionKind::Ssh,
+            host: "example.local".into(),
+            port: 22,
+            username: "root".into(),
+            auth: AuthKind::Agent { socket_path: None },
+            folder: Some("Lab".into()),
+            tags: vec!["nutanix".into()],
+            source: None,
+        }
+    }
+
+    fn open_temp() -> (tempfile::TempDir, Arc<ConnectionStore>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::open(dir.path().join("c.json").to_string_lossy().into()).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn roundtrip_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        let store = ConnectionStore::open(path.to_string_lossy().into()).unwrap();
+        let stored = store.upsert(sample("nutanix1")).unwrap();
+        assert!(!stored.id.is_empty());
+        store.upsert(sample("aihost01")).unwrap();
+
+        let reopened = ConnectionStore::open(path.to_string_lossy().into()).unwrap();
+        let names: Vec<_> = reopened.list().into_iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["aihost01", "nutanix1"]);
+
+        assert!(reopened.delete(stored.id.clone()).unwrap());
+        assert!(!reopened.delete(stored.id).unwrap());
+        assert_eq!(reopened.list().len(), 1);
+    }
+
+    #[test]
+    fn upsert_replaces_by_id() {
+        let (_dir, store) = open_temp();
+        let mut c = store.upsert(sample("one")).unwrap();
+        c.host = "changed.local".into();
+        store.upsert(c.clone()).unwrap();
+        assert_eq!(store.list().len(), 1);
+        assert_eq!(store.get(c.id).unwrap().host, "changed.local");
+    }
+
+    #[test]
+    fn rejects_blank_name_and_host() {
+        let (_dir, store) = open_temp();
+        let mut c = sample("");
+        assert!(matches!(store.upsert(c.clone()), Err(CoreError::Invalid(_))));
+        c.name = "x".into();
+        c.host = " ".into();
+        assert!(matches!(store.upsert(c), Err(CoreError::Invalid(_))));
+    }
+
+    #[test]
+    fn loads_a_version_one_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.json");
+        fs::write(
+            &path,
+            r#"{"version":1,"connections":[{"id":"a","name":"old","kind":"Ssh","host":"h","port":22,
+                "username":"u","auth":{"KeyFile":{"path":"/k"}},"folder":null,"tags":[]}]}"#,
+        )
+        .unwrap();
+        let store = ConnectionStore::open(path.to_string_lossy().into()).unwrap();
+        let c = store.get("a".into()).unwrap();
+        assert_eq!(c.auth, AuthKind::KeyFile { path: "/k".into() });
+        assert_eq!(c.source, None);
+        assert!(store.list_credentials().is_empty());
+        assert!(store.list_providers().is_empty());
+    }
+
+    #[test]
+    fn credentials_and_their_users() {
+        let (_dir, store) = open_temp();
+        let cred = store
+            .upsert_credential(Credential {
+                id: String::new(),
+                name: "domain admin".into(),
+                username: "CORP\\admin".into(),
+                kind: CredentialKind::Vault,
+                folder: None,
+                has_private_key: false,
+                tags: vec![],
+                source: None,
+            })
+            .unwrap();
+        let mut c = sample("dc01");
+        c.auth = AuthKind::Credential { credential_id: cred.id.clone() };
+        store.upsert(c).unwrap();
+        assert_eq!(store.connections_using_credential(cred.id.clone()).len(), 1);
+        assert!(store.delete_credential(cred.id.clone()).unwrap());
+        assert!(store.get_credential(cred.id).is_none());
+
+        let bad = Credential {
+            id: String::new(),
+            name: "x".into(),
+            username: String::new(),
+            kind: CredentialKind::OnePassword { item_id: " ".into(), account: None, op_path: None },
+            folder: None,
+            has_private_key: false,
+            tags: vec![],
+            source: None,
+        };
+        assert!(matches!(store.upsert_credential(bad), Err(CoreError::Invalid(_))));
+    }
+
+    #[test]
+    fn deleting_a_provider_removes_what_it_generated() {
+        let (_dir, store) = open_temp();
+        let provider = store
+            .upsert_provider(Provider {
+                id: String::new(),
+                name: "1Password".into(),
+                kind: ProviderKind::OnePassword { op_path: None, account: None, vaults: vec![] },
+                folder: String::new(),
+                auto_refresh_minutes: 0,
+                last_sync_epoch: None,
+                last_status: None,
+            })
+            .unwrap();
+        assert_eq!(provider.folder, "1Password");
+        let mut generated = sample("gen");
+        generated.source = Some(provider.id.clone());
+        store.upsert(generated).unwrap();
+        store.upsert(sample("manual")).unwrap();
+        assert!(store.delete_provider(provider.id).unwrap());
+        let names: Vec<_> = store.list().into_iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["manual"]);
+    }
+
+    #[test]
+    fn provider_validation() {
+        let (_dir, store) = open_temp();
+        let ad = Provider {
+            id: String::new(),
+            name: "AD".into(),
+            kind: ProviderKind::ActiveDirectory {
+                server: String::new(),
+                search_base: "DC=x".into(),
+                bind_credential_id: None,
+                admin_credential_id: None,
+                user_credential_id: None,
+                allow_plain_ldap: true,
+                accept_invalid_certs: false,
+            },
+            folder: "AD".into(),
+            auto_refresh_minutes: 0,
+            last_sync_epoch: None,
+            last_status: None,
+        };
+        assert!(matches!(store.upsert_provider(ad), Err(CoreError::Invalid(_))));
+    }
+
+    /// Writes a fake `op` that answers `item list` and `item get` with canned JSON.
+    fn fake_op(dir: &Path) -> PathBuf {
+        let path = dir.join("op");
+        fs::write(
+            &path,
+            r#"#!/bin/sh
+echo "$@" >> "$(dirname "$0")/op.log"
+case "$1 $2" in
+  "item list")
+    echo '[{"id":"i1","title":"nutanix1","vault":{"name":"work"},"category":"LOGIN","additional_information":"admin"},
+           {"id":"i2","title":"lab key","vault":{"name":"work"},"category":"SSH_KEY"}]' ;;
+  "item get")
+    echo '{"id":"i1","fields":[{"id":"username","value":"admin"},{"id":"password","value":"pw"}]}' ;;
+  *) echo "unexpected" >&2; exit 1 ;;
+esac
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn one_password_sync_generates_credentials() {
+        let (dir, store) = open_temp();
+        let op = fake_op(dir.path());
+        let provider = store
+            .upsert_provider(Provider {
+                id: String::new(),
+                name: "1Password".into(),
+                kind: ProviderKind::OnePassword {
+                    op_path: Some(op.to_string_lossy().into()),
+                    account: Some("work".into()),
+                    vaults: vec!["work".into(), "shared".into()],
+                },
+                folder: "1Password".into(),
+                auto_refresh_minutes: 30,
+                last_sync_epoch: None,
+                last_status: None,
+            })
+            .unwrap();
+
+        let result = store.sync_provider(provider.id.clone(), None).await.unwrap();
+        // Two vault filters, each answered with two items.
+        assert_eq!(result.credentials, 4);
+        let creds = store.list_credentials();
+        assert_eq!(creds.len(), 4);
+        let key = creds.iter().find(|c| c.name == "lab key").unwrap();
+        assert!(key.has_private_key);
+        assert_eq!(key.folder.as_deref(), Some("1Password/work"));
+        assert_eq!(key.source.as_deref(), Some(provider.id.as_str()));
+        let login = creds.iter().find(|c| c.name == "nutanix1").unwrap();
+        assert_eq!(login.username, "admin");
+        assert!(matches!(&login.kind, CredentialKind::OnePassword { item_id, account, .. }
+            if item_id == "i1" && account.as_deref() == Some("work")));
+
+        let log = fs::read_to_string(dir.path().join("op.log")).unwrap();
+        assert!(log.contains("item list --format=json --account work --vault work"), "{log}");
+        assert!(log.contains("--vault shared"), "{log}");
+
+        // Syncing again replaces rather than duplicates.
+        store.sync_provider(provider.id.clone(), None).await.unwrap();
+        assert_eq!(store.list_credentials().len(), 4);
+        let synced = store.get_provider(provider.id).unwrap();
+        assert!(synced.last_sync_epoch.is_some());
+        assert_eq!(synced.last_status.as_deref(), Some("4 credentials"));
+    }
+
+    #[tokio::test]
+    async fn failed_sync_is_recorded() {
+        let (_dir, store) = open_temp();
+        let provider = store
+            .upsert_provider(Provider {
+                id: String::new(),
+                name: "broken".into(),
+                kind: ProviderKind::OnePassword {
+                    op_path: Some("/nonexistent/op".into()),
+                    account: None,
+                    vaults: vec![],
+                },
+                folder: "x".into(),
+                auto_refresh_minutes: 0,
+                last_sync_epoch: None,
+                last_status: None,
+            })
+            .unwrap();
+        assert!(store.sync_provider(provider.id.clone(), None).await.is_err());
+        let status = store.get_provider(provider.id).unwrap().last_status.unwrap();
+        assert!(status.starts_with("failed:"), "{status}");
+    }
+}
