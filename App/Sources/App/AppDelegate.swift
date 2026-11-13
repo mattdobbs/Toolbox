@@ -83,6 +83,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         if args.contains("--demo-move") {
             controller.movePaneToNewWorkspace(nil)
         }
+        // Testing aid: close the focused pane shortly after launch, the way
+        // its × button would.
+        if args.contains("--demo-close") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                controller.paneVC.closePane(controller.paneVC.focusedPane.id)
+            }
+        }
         // Testing aids: open an editor sheet straight away.
         if let index = args.firstIndex(of: "--edit-connection"), index + 1 < args.count {
             let wanted = args[index + 1]

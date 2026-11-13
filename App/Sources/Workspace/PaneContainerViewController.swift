@@ -122,7 +122,14 @@ final class PaneContainerViewController: NSViewController {
 
     var paneCount: Int { tree.leaves.count }
 
-    var focusedPane: PaneView { panes[focusedID]! }
+    /// The focused pane. Focus is repaired if it points at a pane that is
+    /// gone; the tree always has at least one leaf and every leaf has a view.
+    var focusedPane: PaneView {
+        if let pane = panes[focusedID] { return pane }
+        let fallback = tree.leaves.first ?? panes.keys.first!
+        focusedID = fallback
+        return panes[fallback]!
+    }
 
     var liveSessionCount: Int {
         panes.values.filter { $0.content?.isLive == true }.count
@@ -162,11 +169,17 @@ final class PaneContainerViewController: NSViewController {
         let order = tree.leaves
         let index = order.firstIndex(of: id) ?? 0
         tree = tree.removing(id) ?? .leaf(id)
+        let remaining = tree.leaves
+        // Decide where focus goes before the pane disappears: rebuild()
+        // notifies the window, which validates its toolbar and asks for the
+        // focused pane, so focus must never point at a removed pane.
+        let next = focusedID == id ? remaining[min(index, remaining.count - 1)] : focusedID
+        let focusMoved = next != focusedID
+        focusedID = next
         panes[id] = nil
         pane.removeFromSuperview()
         rebuild()
-        let remaining = tree.leaves
-        setFocus(remaining[min(index, remaining.count - 1)], makeFirstResponder: true)
+        setFocus(next, makeFirstResponder: focusMoved)
     }
 
     func focusNeighbor(_ delta: Int) {

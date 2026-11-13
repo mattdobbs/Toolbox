@@ -115,7 +115,8 @@ Launch overrides for a throwaway setup: `TOOLBOX_STORE_PATH`,
 `TOOLBOX_VAULT_PATH`, `TOOLBOX_KNOWN_HOSTS`, `--connect <id>` to open a
 connection on start, `--files <id>` to open its SFTP browser (both may repeat, each
 opening another pane), `--expand-all` to expand the whole sidebar tree, `--demo-move` to move the
-focused pane into a new workspace after launch, `--edit-connection <id|new>` and
+focused pane into a new workspace after launch, `--demo-close` to close the focused pane after launch,
+`--edit-connection <id|new>` and
 `--set-folder-credential <path>` to open those sheets at launch, `--unlock-vault` to unlock the vault at launch and
 log the outcome, `TOOLBOX_KEYCHAIN_SERVICE` to use a separate Keychain item for the vault key, and
 the standard defaults override `-vaultRequiresAuth NO` to skip the Touch ID step for that run.
