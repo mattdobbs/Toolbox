@@ -3,12 +3,13 @@
 #   make app      build the app with SwiftPM and wrap it in build/Toolbox.app
 #   make run      build and launch the app
 #   make test     run the Rust core tests
+#   make icon     re-render the app icon (icns + asset catalog)
 #   make project  regenerate App/Toolbox.xcodeproj from App/project.yml
 #   make xcode    build the Xcode project (needs the Xcode license accepted)
 export PATH := $(HOME)/.cargo/bin:/opt/homebrew/bin:$(PATH)
 XCODE_DEV := /Applications/Xcode.app/Contents/Developer
 
-.PHONY: all core app run test project xcode clean
+.PHONY: all core app run test project xcode icon clean
 
 all: core app
 
@@ -26,6 +27,9 @@ test:
 
 project:
 	cd App && xcodegen generate
+
+icon:
+	bridge/make-icon.sh
 
 xcode: project
 	DEVELOPER_DIR=$(XCODE_DEV) xcodebuild -project App/Toolbox.xcodeproj -scheme Toolbox \

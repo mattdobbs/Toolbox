@@ -9,6 +9,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var connections: [Connection] = []
     @Published private(set) var credentials: [Credential] = []
     @Published private(set) var providers: [Provider] = []
+    /// Folder paths (`ACME/Jump Boxes`), including empty ones.
+    @Published private(set) var folders: [String] = []
 
     let store: ConnectionStore
     let storeURL: URL
@@ -47,7 +49,14 @@ final class AppModel: ObservableObject {
             let broken = url.deletingPathExtension().appendingPathExtension("broken-\(stamp).json")
             try? FileManager.default.moveItem(at: url, to: broken)
             NSLog("connections.json could not be read (\(error)); moved to \(broken.path)")
-            return try! ConnectionStore.open(path: url.path)
+            if let fresh = try? ConnectionStore.open(path: url.path) {
+                return fresh
+            }
+            // Last resort: an in-memory-like store in the temp directory so the app still opens.
+            let temp = FileManager.default.temporaryDirectory.appendingPathComponent("toolbox-connections.json")
+            Prompts.error(title: "Connections can't be saved",
+                          message: "The store at \(url.path) is unusable; working from a temporary copy until it's fixed.")
+            return try! ConnectionStore.open(path: temp.path)
         }
     }
 
@@ -55,6 +64,43 @@ final class AppModel: ObservableObject {
         connections = store.list()
         credentials = store.listCredentials()
         providers = store.listProviders()
+        folders = store.listFolders()
+    }
+
+    // MARK: Folders
+
+    @discardableResult
+    func addFolder(_ path: String) throws -> String {
+        let created = try store.addFolder(path: path)
+        reload()
+        return created
+    }
+
+    func renameFolder(_ path: String, to newPath: String) throws {
+        _ = try store.renameFolder(from: path, to: newPath)
+        reload()
+        ProviderSync.shared.scheduleAutoRefresh()
+    }
+
+    func deleteFolder(_ path: String) throws {
+        try store.deleteFolder(path: path)
+        reload()
+    }
+
+    func moveConnection(_ connection: Connection, to folder: String?) throws {
+        try store.moveConnection(id: connection.id, folder: folder)
+        reload()
+    }
+
+    func moveCredential(_ credential: Credential, to folder: String?) throws {
+        try store.moveCredential(id: credential.id, folder: folder)
+        reload()
+    }
+
+    func moveProvider(_ provider: Provider, to parent: String?) throws {
+        try store.moveProvider(id: provider.id, parent: parent)
+        reload()
+        ProviderSync.shared.scheduleAutoRefresh()
     }
 
     // MARK: Connections

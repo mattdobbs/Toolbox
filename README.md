@@ -38,7 +38,23 @@ Re-run `make core` whenever the Rust API changes.
 ## What works
 
 - Workspaces as native window tabs, split panes, SSH terminals (SwiftTerm on
-  Metal) with themes and text-size shortcuts.
+  Metal) with themes and text-size shortcuts. Arrange panes by dragging:
+  grab a pane's header and drop it on another pane's edge to split there or
+  on its middle to swap; drag a connection from the sidebar onto a pane the
+  same way to open it in place. Divider positions are kept when panes come
+  and go. Sessions follow their pane: terminals reflow and RDP desktops are
+  renegotiated at the new pixel size. A session that ends cleanly (RDP
+  sign-out, shell logout) closes its pane by itself; one that fails stays so
+  the message can be read.
+- Workspaces are tabs (the bar stays visible; "+" or ⌘T adds one) and any mix
+  of sessions can live in any of them. Move a pane to another workspace from
+  its header's context menu or the Pane menu (⌘⇧M for a new workspace); the
+  session keeps running through the move.
+- A sidebar tree like Royal TS: folders you create (nest them with `/`),
+  providers as folders in place with what they generate underneath (an
+  Active Directory provider shows its OU hierarchy), drag and drop between
+  folders, context menus on every node, and flat "All Connections" and "All
+  Credentials" lists at the bottom. Expansion is remembered.
 - Credentials: username plus password or SSH key, kept encrypted in a local
   vault (key in the login Keychain, unlocked with Touch ID), fetched from
   1Password at connect time, or prompted for.
@@ -52,22 +68,32 @@ Re-run `make core` whenever the Rust API changes.
   Display Control (falling back to a reconnect at the new size), frames land
   in an IOSurface-backed layer, full keyboard and mouse.
 - VNC through RoyalVNCKit, the engine Royal TS itself ships.
+- SFTP file browsing for any SSH connection (sidebar context menu, ⌘⇧F, or
+  the toolbar): navigate, upload, download with progress, new folder, rename
+  and delete.
 
 ## Trying it without real hosts
 
 ```sh
 cd core
-cargo run --example echo_server -- --key <openssh-private-key>   # SSH on 127.0.0.1:2222
-cargo run --example rdp_server --features test-support           # RDP on 127.0.0.1:3390, demo / secret
+cargo run --example echo_server --features test-support -- --key <openssh-private-key>   # SSH + SFTP on 127.0.0.1:2222, demo / secret
+                                                       # add --exit-after <secs> to have shells log out on their own
+cargo run --example rdp_server --features test-support                                   # RDP on 127.0.0.1:3390, demo / secret
 ```
 
 Launch overrides for a throwaway setup: `TOOLBOX_STORE_PATH`,
-`TOOLBOX_VAULT_PATH`, `TOOLBOX_KNOWN_HOSTS`, and `--connect <id>` to open a
-connection on start.
+`TOOLBOX_VAULT_PATH`, `TOOLBOX_KNOWN_HOSTS`, `--connect <id>` to open a
+connection on start, `--files <id>` to open its SFTP browser (both may repeat, each
+opening another pane), `--expand-all` to expand the whole sidebar tree, and `--demo-move` to move the
+focused pane into a new workspace after launch.
+
+`make icon` re-renders the app icon from `bridge/make-icon.swift`.
+`docs/SECURITY-REVIEW.md` records the review findings and residual risks.
 
 ## Next
 
-SFTP, clipboard and audio for RDP, a client-side RDP pointer, session restore,
-broadcast input, jump hosts and port forwards.
+Clipboard and audio for RDP, a client-side RDP pointer, per-connection RDP
+certificate verification, session restore, broadcast input, jump hosts and
+port forwards.
 
 `docs/royalts-reference/` holds the Royal TSX scripts the providers replace.

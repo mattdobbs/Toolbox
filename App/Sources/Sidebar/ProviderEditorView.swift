@@ -16,7 +16,10 @@ enum ProviderKindChoice: String, CaseIterable, Identifiable {
 struct ProviderDraft {
     var id = ""
     var name = ""
-    var folder = ""
+    /// Folder the provider sits in; its own node is named after it.
+    var parent = ""
+    /// Name of the provider's own folder node; follows `name` for new ones.
+    var leaf = ""
     var kind: ProviderKindChoice = .onePassword
     var autoRefreshMinutes = 60
     var opPath = ""
@@ -37,7 +40,8 @@ struct ProviderDraft {
     init(_ provider: Provider) {
         id = provider.id
         name = provider.name
-        folder = provider.folder
+        parent = (provider.folder as NSString).deletingLastPathComponent
+        leaf = (provider.folder as NSString).lastPathComponent
         autoRefreshMinutes = Int(provider.autoRefreshMinutes)
         lastSyncEpoch = provider.lastSyncEpoch
         lastStatus = provider.lastStatus
@@ -84,11 +88,14 @@ struct ProviderDraft {
                                     allowPlainLdap: allowPlainLdap,
                                     acceptInvalidCerts: acceptInvalidCerts)
         }
+        let trimmedName = name.trimmingCharacters(in: .whitespaces)
+        let node = leaf.trimmingCharacters(in: .whitespaces).isEmpty ? trimmedName : leaf.trimmingCharacters(in: .whitespaces)
+        let location = parent.trimmingCharacters(in: .whitespaces)
         return Provider(
             id: id,
-            name: name.trimmingCharacters(in: .whitespaces),
+            name: trimmedName,
             kind: kind,
-            folder: folder.trimmingCharacters(in: .whitespaces),
+            folder: location.isEmpty ? node : "\(location)/\(node)",
             autoRefreshMinutes: UInt32(max(autoRefreshMinutes, 0)),
             lastSyncEpoch: lastSyncEpoch,
             lastStatus: lastStatus
@@ -109,7 +116,10 @@ struct ProviderEditorView: View {
             Form {
                 Section("Provider") {
                     TextField("Name", text: $draft.name, prompt: Text(draft.kind.label))
-                    TextField("Folder", text: $draft.folder, prompt: Text(draft.name.isEmpty ? "Same as name" : draft.name))
+                    TextField("Location", text: $draft.parent, prompt: Text("Top level; use / for subfolders"))
+                    Text("Appears as a folder named after the provider; what it generates lands inside.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     Picker("Source", selection: $draft.kind) {
                         ForEach(ProviderKindChoice.allCases) { Text($0.label).tag($0) }
                     }

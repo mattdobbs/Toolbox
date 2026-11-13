@@ -20,7 +20,7 @@ use crate::runtime::RUNTIME;
 
 /// Credentials for one SSH session. Passwords and passphrases are supplied
 /// for exactly this connection attempt and are not retained by the core.
-#[derive(Debug, Clone, uniffi::Enum)]
+#[derive(Clone, uniffi::Enum)]
 pub enum SshAuth {
     Password {
         password: String,
@@ -39,6 +39,25 @@ pub enum SshAuth {
     Agent {
         socket_path: Option<String>,
     },
+}
+
+impl std::fmt::Debug for SshAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SshAuth::Password { .. } => write!(f, "Password(<redacted>)"),
+            SshAuth::KeyFile { path, passphrase } => f
+                .debug_struct("KeyFile")
+                .field("path", path)
+                .field("passphrase", &passphrase.as_ref().map(|_| "<redacted>"))
+                .finish(),
+            SshAuth::KeyData { passphrase, .. } => f
+                .debug_struct("KeyData")
+                .field("key", &"<redacted>")
+                .field("passphrase", &passphrase.as_ref().map(|_| "<redacted>"))
+                .finish(),
+            SshAuth::Agent { socket_path } => f.debug_struct("Agent").field("socket_path", socket_path).finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -64,7 +83,9 @@ pub trait SshListener: Send + Sync {
     fn on_connected(&self);
     fn on_data(&self, data: Vec<u8>);
     fn on_error(&self, message: String);
-    fn on_closed(&self);
+    /// `clean` is true when the shell ended on its own or was closed here,
+    /// false after a failure that `on_error` reported.
+    fn on_closed(&self, clean: bool);
     /// Called for a host whose key is not yet in known_hosts.
     /// Return `true` to trust it; it is then recorded for next time.
     fn confirm_host_key(&self, host: String, port: u16, key_type: String, fingerprint: String)
@@ -115,26 +136,53 @@ impl SshSession {
     }
 }
 
+/// Whoever answers host-key questions for a connection attempt: the
+/// terminal listener for shells, the SFTP listener for file browsing.
+pub(crate) trait HostKeyPrompt: Send + Sync {
+    fn confirm_host_key(&self, host: String, port: u16, key_type: String, fingerprint: String) -> bool;
+    fn report_error(&self, message: String);
+}
+
+struct ListenerPrompt(Arc<dyn SshListener>);
+
+impl HostKeyPrompt for ListenerPrompt {
+    fn confirm_host_key(&self, host: String, port: u16, key_type: String, fingerprint: String) -> bool {
+        self.0.confirm_host_key(host, port, key_type, fingerprint)
+    }
+
+    fn report_error(&self, message: String) {
+        self.0.on_error(message)
+    }
+}
+
 async fn run_session(
     config: SshConfig,
     listener: Arc<dyn SshListener>,
     rx: mpsc::UnboundedReceiver<Cmd>,
     closed: Arc<AtomicBool>,
 ) {
-    match open_shell(&config, listener.clone()).await {
+    let prompt: Arc<dyn HostKeyPrompt> = Arc::new(ListenerPrompt(listener.clone()));
+    let clean = match open_shell(&config, prompt).await {
         Ok((handle, channel)) => {
             listener.on_connected();
-            pump(handle, channel, listener.clone(), rx).await;
+            pump(handle, channel, listener.clone(), rx).await
         }
-        Err(e) => listener.on_error(e.to_string()),
-    }
+        Err(e) => {
+            listener.on_error(e.to_string());
+            false
+        }
+    };
     closed.store(true, Ordering::SeqCst);
-    listener.on_closed();
+    listener.on_closed(clean);
 }
 
 type Shell = (client::Handle<Handler>, russh::Channel<client::Msg>);
 
-async fn open_shell(config: &SshConfig, listener: Arc<dyn SshListener>) -> Result<Shell, CoreError> {
+/// Connects and authenticates; shared by shells and SFTP.
+pub(crate) async fn open_handle(
+    config: &SshConfig,
+    prompt: Arc<dyn HostKeyPrompt>,
+) -> Result<client::Handle<Handler>, CoreError> {
     if config.host.trim().is_empty() {
         return Err(CoreError::Invalid("host is required".into()));
     }
@@ -142,17 +190,19 @@ async fn open_shell(config: &SshConfig, listener: Arc<dyn SshListener>) -> Resul
         return Err(CoreError::Invalid("username is required".into()));
     }
 
-    let mut cfg = client::Config::default();
-    cfg.inactivity_timeout = None;
-    cfg.keepalive_interval = Some(Duration::from_secs(30));
-    cfg.keepalive_max = 3;
-    cfg.nodelay = true;
+    let cfg = client::Config {
+        inactivity_timeout: None,
+        keepalive_interval: Some(Duration::from_secs(30)),
+        keepalive_max: 3,
+        nodelay: true,
+        ..client::Config::default()
+    };
 
     let handler = Handler {
         host: config.host.clone(),
         port: config.port,
         known_hosts: config.known_hosts_path.as_deref().map(expand_tilde),
-        listener,
+        prompt,
     };
 
     let timeout = Duration::from_secs(u64::from(config.connect_timeout_secs.max(1)));
@@ -169,7 +219,18 @@ async fn open_shell(config: &SshConfig, listener: Arc<dyn SshListener>) -> Resul
         })?
         .map_err(map_russh_error)?;
 
-    authenticate(&mut handle, config).await?;
+    // A server that accepts the TCP connection but never answers the auth
+    // exchange must not hang the session forever.
+    tokio::time::timeout(AUTH_TIMEOUT, authenticate(&mut handle, config))
+        .await
+        .map_err(|_| CoreError::Auth(format!("{}:{} did not complete authentication in time", config.host, config.port)))??;
+    Ok(handle)
+}
+
+const AUTH_TIMEOUT: Duration = Duration::from_secs(60);
+
+async fn open_shell(config: &SshConfig, prompt: Arc<dyn HostKeyPrompt>) -> Result<Shell, CoreError> {
+    let handle = open_handle(config, prompt).await?;
 
     let channel = handle
         .channel_open_session()
@@ -299,11 +360,11 @@ async fn authenticate_with_agent(
     Ok(last.expect("identities is non-empty"))
 }
 
-struct Handler {
+pub(crate) struct Handler {
     host: String,
     port: u16,
     known_hosts: Option<PathBuf>,
-    listener: Arc<dyn SshListener>,
+    prompt: Arc<dyn HostKeyPrompt>,
 }
 
 impl client::Handler for Handler {
@@ -321,7 +382,7 @@ impl client::Handler for Handler {
         match check {
             Ok(true) => Ok(true),
             Err(keys::Error::KeyChanged { line }) => {
-                self.listener.on_error(format!(
+                self.prompt.report_error(format!(
                     "WARNING: the host key for {}:{} has changed (known_hosts line {line}). \
                      Refusing to connect; remove the stale entry if the host was reinstalled.",
                     self.host, self.port
@@ -332,10 +393,10 @@ impl client::Handler for Handler {
             Ok(false) | Err(_) => {
                 let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
                 let key_type = key.algorithm().to_string();
-                let (host, port, listener) = (self.host.clone(), self.port, self.listener.clone());
-                // The listener may block on a dialog; keep the worker free.
+                let (host, port, prompt) = (self.host.clone(), self.port, self.prompt.clone());
+                // The prompt may block on a dialog; keep the worker free.
                 let accepted = tokio::task::block_in_place(move || {
-                    listener.confirm_host_key(host, port, key_type, fingerprint)
+                    prompt.confirm_host_key(host, port, key_type, fingerprint)
                 });
                 if accepted {
                     let learned = match &self.known_hosts {
@@ -354,18 +415,19 @@ impl client::Handler for Handler {
     }
 }
 
+/// Runs the shell until it ends. Returns whether it ended cleanly.
 async fn pump(
     handle: client::Handle<Handler>,
     mut channel: russh::Channel<client::Msg>,
     listener: Arc<dyn SshListener>,
     mut rx: mpsc::UnboundedReceiver<Cmd>,
-) {
+) -> bool {
     enum Event {
         Server(Option<ChannelMsg>),
         Client(Option<Cmd>),
     }
 
-    loop {
+    let clean = loop {
         let event = tokio::select! {
             msg = channel.wait() => Event::Server(msg),
             cmd = rx.recv() => Event::Client(cmd),
@@ -375,12 +437,12 @@ async fn pump(
             Event::Server(Some(ChannelMsg::ExtendedData { data, .. })) => {
                 listener.on_data(data.to_vec())
             }
-            Event::Server(Some(ChannelMsg::Close)) | Event::Server(None) => break,
+            Event::Server(Some(ChannelMsg::Close)) | Event::Server(None) => break true,
             Event::Server(Some(_)) => {}
             Event::Client(Some(Cmd::Write(bytes))) => {
                 if let Err(e) = channel.data_bytes(bytes).await {
                     listener.on_error(format!("write failed: {e}"));
-                    break;
+                    break false;
                 }
             }
             Event::Client(Some(Cmd::Resize { cols, rows })) => {
@@ -394,16 +456,17 @@ async fn pump(
             Event::Client(Some(Cmd::Close)) | Event::Client(None) => {
                 let _ = channel.eof().await;
                 let _ = channel.close().await;
-                break;
+                break true;
             }
         }
-    }
+    };
     let _ = handle
         .disconnect(Disconnect::ByApplication, "", "en")
         .await;
+    clean
 }
 
-fn map_russh_error(e: russh::Error) -> CoreError {
+pub(crate) fn map_russh_error(e: russh::Error) -> CoreError {
     match e {
         russh::Error::UnknownKey => CoreError::HostKey("server host key was not accepted".into()),
         russh::Error::IO(io) => CoreError::Connect(io.to_string()),
@@ -423,7 +486,7 @@ fn describe_auth(auth: &SshAuth) -> String {
     }
 }
 
-fn expand_tilde(path: &str) -> PathBuf {
+pub(crate) fn expand_tilde(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
             return Path::new(&home).join(rest);

@@ -14,6 +14,7 @@ struct Seen {
     regions: Mutex<Vec<(u16, u16, u16, u16)>>,
     errors: Mutex<Vec<String>>,
     closed: AtomicBool,
+    clean: AtomicBool,
     close_reason: Mutex<Option<String>>,
 }
 
@@ -32,8 +33,9 @@ impl RdpListener for Recorder {
     fn on_error(&self, message: String) {
         self.0.errors.lock().unwrap().push(message);
     }
-    fn on_closed(&self, reason: String) {
+    fn on_closed(&self, reason: String, clean: bool) {
         *self.0.close_reason.lock().unwrap() = Some(reason);
+        self.0.clean.store(clean, SeqCst);
         self.0.closed.store(true, SeqCst);
     }
 }
@@ -109,6 +111,7 @@ fn connects_renders_inputs_and_resizes() {
     session.close();
     wait_until("close", 10, || seen.closed.load(SeqCst));
     assert!(session.is_closed());
+    assert!(seen.clean.load(SeqCst));
     assert!(seen.errors.lock().unwrap().is_empty(), "{:?}", seen.errors.lock().unwrap());
 }
 
@@ -121,6 +124,7 @@ fn wrong_password_is_reported() {
     let _session = RdpSession::connect(config(server.addr, "nope"), Box::new(Recorder(seen.clone())));
     wait_until("closed", 20, || seen.closed.load(SeqCst));
     assert!(seen.connected.lock().unwrap().is_none());
+    assert!(!seen.clean.load(SeqCst));
     let errors = seen.errors.lock().unwrap().clone();
     assert_eq!(errors.len(), 1, "{errors:?}");
 }

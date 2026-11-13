@@ -10,6 +10,7 @@ final class VncSessionView: NSView, PaneContent, VNCConnectionDelegate {
     private var framebufferView: VNCCAFramebufferView?
     private var username = ""
     private var password = ""
+    private var terminated = false
     private let status = NSTextField(wrappingLabelWithString: "")
 
     // MARK: PaneContent
@@ -24,6 +25,8 @@ final class VncSessionView: NSView, PaneContent, VNCConnectionDelegate {
     var onTitleChange: ((String) -> Void)?
     var onStateChange: (() -> Void)?
     var onFocus: (() -> Void)?
+    var onSessionEnded: ((Bool) -> Void)?
+    private var wasConnected = false
 
     init(connection: Connection) {
         self.connection = connection
@@ -59,6 +62,7 @@ final class VncSessionView: NSView, PaneContent, VNCConnectionDelegate {
     }
 
     func start(username: String, password: String) {
+        guard !terminated else { return }
         self.username = username
         self.password = password
         let settings = VNCConnection.Settings(
@@ -93,8 +97,10 @@ final class VncSessionView: NSView, PaneContent, VNCConnectionDelegate {
     }
 
     func terminate() {
+        terminated = true
         vnc?.disconnect()
         isLive = false
+        password = ""
     }
 
     private func setStatus(_ text: String) {
@@ -119,6 +125,7 @@ final class VncSessionView: NSView, PaneContent, VNCConnectionDelegate {
                 setStatus("Connecting to \(self.connection.host)…")
             case .connected:
                 isLive = true
+                wasConnected = true
                 setStatus("")
             case .disconnecting:
                 break
@@ -128,8 +135,10 @@ final class VncSessionView: NSView, PaneContent, VNCConnectionDelegate {
                 framebufferView = nil
                 if let error = connectionState.error {
                     setStatus("Disconnected: \(error.localizedDescription)")
+                    if !terminated { onSessionEnded?(false) }
                 } else {
-                    setStatus("Disconnected")
+                    setStatus("Session ended")
+                    if !terminated { onSessionEnded?(wasConnected) }
                 }
                 if vnc === connection { vnc = nil }
             @unknown default:

@@ -17,6 +17,12 @@ pub enum CoreError {
     Invalid(String),
 }
 
+/// Locks a mutex, recovering the data if another thread panicked while
+/// holding it; a poisoned lock must never take a whole session down.
+pub(crate) fn lock_or_recover<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 impl From<std::io::Error> for CoreError {
     fn from(e: std::io::Error) -> Self {
         CoreError::Io(e.to_string())

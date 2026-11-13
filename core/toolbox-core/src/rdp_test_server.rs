@@ -180,7 +180,7 @@ impl RdpServerDisplayUpdates for Updates {
                 let slot = self.tick % (slots_x * slots_y);
                 let x = (slot % slots_x) as u16 * block;
                 let y = (slot / slots_x) as u16 * block;
-                let color = if self.tick % 2 == 0 { [0xF0, 0xF0, 0xF0, 0xFF] } else { [0x20, 0x20, 0xE0, 0xFF] };
+                let color = if self.tick.is_multiple_of(2) { [0xF0, 0xF0, 0xF0, 0xFF] } else { [0x20, 0x20, 0xE0, 0xFF] };
                 Ok(Some(self.bitmap(x, y, block.min(size.width - x), block.min(size.height - y), color)))
             }
         }

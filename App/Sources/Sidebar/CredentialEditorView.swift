@@ -117,7 +117,7 @@ struct CredentialEditorView: View {
                 Section("Credential") {
                     TextField("Name", text: $draft.name, prompt: Text("Domain admin"))
                     TextField("Username", text: $draft.username, prompt: Text("DOMAIN\\user or root"))
-                    TextField("Folder", text: $draft.folder, prompt: Text("Optional"))
+                    TextField("Folder", text: $draft.folder, prompt: Text("Optional; use / for subfolders"))
                 }
                 Section("Secret") {
                     Picker("Kept", selection: $draft.kind) {

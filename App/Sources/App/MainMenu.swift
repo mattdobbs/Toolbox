@@ -28,6 +28,9 @@ enum MainMenu {
         newCredential.keyEquivalentModifierMask = [.command, .shift]
         file.addItem(withTitle: "New Provider…", action: #selector(WorkspaceWindowController.newProvider(_:)), keyEquivalent: "")
         file.addItem(.separator())
+        let browse = file.addItem(withTitle: "Browse Files (SFTP)", action: #selector(WorkspaceWindowController.browseFiles(_:)), keyEquivalent: "f")
+        browse.keyEquivalentModifierMask = [.command, .shift]
+        file.addItem(.separator())
         file.addItem(withTitle: "Sync Providers", action: #selector(AppDelegate.syncProviders(_:)), keyEquivalent: "r")
         file.addItem(.separator())
         file.addItem(withTitle: "Close Pane", action: #selector(WorkspaceWindowController.closePane(_:)), keyEquivalent: "w")
@@ -68,6 +71,14 @@ enum MainMenu {
         pane.addItem(.separator())
         pane.addItem(withTitle: "Focus Next Pane", action: #selector(WorkspaceWindowController.focusNextPane(_:)), keyEquivalent: "]")
         pane.addItem(withTitle: "Focus Previous Pane", action: #selector(WorkspaceWindowController.focusPreviousPane(_:)), keyEquivalent: "[")
+        pane.addItem(.separator())
+        let moveNew = pane.addItem(withTitle: "Move Pane to New Workspace", action: #selector(WorkspaceWindowController.movePaneToNewWorkspace(_:)), keyEquivalent: "m")
+        moveNew.keyEquivalentModifierMask = [.command, .shift]
+        let moveTo = NSMenuItem(title: "Move Pane to Workspace", action: nil, keyEquivalent: "")
+        let moveToMenu = NSMenu(title: "Move Pane to Workspace")
+        moveToMenu.delegate = NSApp.delegate as? NSMenuDelegate
+        moveTo.submenu = moveToMenu
+        pane.addItem(moveTo)
         main.addItem(submenu: pane)
 
         // Window (AppKit appends the tab items itself)

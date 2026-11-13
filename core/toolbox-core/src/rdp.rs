@@ -32,10 +32,10 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
-use crate::error::CoreError;
+use crate::error::{lock_or_recover, CoreError};
 use crate::runtime::RUNTIME;
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Clone, uniffi::Record)]
 pub struct RdpConfig {
     pub host: String,
     pub port: u16,
@@ -49,6 +49,21 @@ pub struct RdpConfig {
     pub scale_factor: u32,
     pub accept_invalid_certs: bool,
     pub connect_timeout_secs: u32,
+}
+
+impl std::fmt::Debug for RdpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RdpConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("domain", &self.domain)
+            .field("size", &(self.width, self.height))
+            .field("scale_factor", &self.scale_factor)
+            .field("accept_invalid_certs", &self.accept_invalid_certs)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -73,7 +88,9 @@ pub trait RdpListener: Send + Sync {
     fn on_desktop_resized(&self, width: u16, height: u16);
     fn on_region_updated(&self, x: u16, y: u16, width: u16, height: u16);
     fn on_error(&self, message: String);
-    fn on_closed(&self, reason: String);
+    /// `clean` is true when the server ended the session (sign-out,
+    /// disconnect) or it was closed here; false after a failure.
+    fn on_closed(&self, reason: String, clean: bool);
 }
 
 enum Cmd {
@@ -105,7 +122,7 @@ impl RdpSession {
     }
 
     pub fn frame_size(&self) -> FrameSize {
-        match self.image.lock().unwrap().as_ref() {
+        match lock_or_recover(&self.image).as_ref() {
             Some(img) => FrameSize { width: img.width(), height: img.height() },
             None => FrameSize { width: 0, height: 0 },
         }
@@ -113,7 +130,7 @@ impl RdpSession {
 
     /// Pixels of a rectangle as tightly packed BGRA rows, clipped to the frame.
     pub fn copy_region(&self, x: u16, y: u16, width: u16, height: u16) -> Vec<u8> {
-        let guard = self.image.lock().unwrap();
+        let guard = lock_or_recover(&self.image);
         let Some(img) = guard.as_ref() else {
             return Vec::new();
         };
@@ -134,19 +151,18 @@ impl RdpSession {
         match img.pixel_format() {
             PixelFormat::BgrA32 | PixelFormat::BgrX32 => {}
             PixelFormat::RgbA32 | PixelFormat::RgbX32 => {
-                for px in out.chunks_exact_mut(4) {
+                for px in out.as_chunks_mut::<4>().0 {
                     px.swap(0, 2);
                 }
             }
             PixelFormat::ARgb32 | PixelFormat::XRgb32 => {
-                for px in out.chunks_exact_mut(4) {
+                for px in out.as_chunks_mut::<4>().0 {
                     // A R G B -> B G R A
-                    let (a, r, g, b) = (px[0], px[1], px[2], px[3]);
-                    px.copy_from_slice(&[b, g, r, a]);
+                    *px = [px[3], px[2], px[1], px[0]];
                 }
             }
             PixelFormat::ABgr32 | PixelFormat::XBgr32 => {
-                for px in out.chunks_exact_mut(4) {
+                for px in out.as_chunks_mut::<4>().0 {
                     px.rotate_left(1);
                 }
             }
@@ -237,12 +253,12 @@ async fn run_session(
         match connect(&config, size, scale).await {
             Err(e) => {
                 listener.on_error(e.to_string());
-                listener.on_closed("connection failed".into());
+                listener.on_closed("connection failed".into(), false);
                 break;
             }
             Ok((result, framed)) => {
                 let desktop = result.desktop_size;
-                *image.lock().unwrap() = Some(DecodedImage::new(PixelFormat::BgrA32, desktop.width, desktop.height));
+                *lock_or_recover(&image) = Some(DecodedImage::new(PixelFormat::BgrA32, desktop.width, desktop.height));
                 if first {
                     listener.on_connected(desktop.width, desktop.height);
                     first = false;
@@ -251,7 +267,7 @@ async fn run_session(
                 }
                 match active_session(result, framed, &listener, &mut rx, &image).await {
                     Ok(Flow::Closed(reason)) => {
-                        listener.on_closed(reason);
+                        listener.on_closed(reason, true);
                         break;
                     }
                     Ok(Flow::Reconnect { width, height, scale_factor }) => {
@@ -261,7 +277,7 @@ async fn run_session(
                     }
                     Err(e) => {
                         listener.on_error(e.to_string());
-                        listener.on_closed("connection lost".into());
+                        listener.on_closed("connection lost".into(), false);
                         break;
                     }
                 }
@@ -432,7 +448,7 @@ where
         let outputs = match event {
             Event::Frame(Err(e)) => return Err(CoreError::Connect(format!("connection lost: {e}"))),
             Event::Frame(Ok((action, payload))) => {
-                let mut guard = image.lock().unwrap();
+                let mut guard = lock_or_recover(image);
                 let img = guard.as_mut().ok_or_else(|| CoreError::Connect("no framebuffer".into()))?;
                 active_stage
                     .process(img, action, &payload, reader.last_read_at())
@@ -453,7 +469,7 @@ where
                 if events.is_empty() {
                     Vec::new()
                 } else {
-                    let mut guard = image.lock().unwrap();
+                    let mut guard = lock_or_recover(image);
                     let img = guard.as_mut().ok_or_else(|| CoreError::Connect("no framebuffer".into()))?;
                     active_stage
                         .process_fastpath_input(img, &events)
@@ -501,7 +517,7 @@ where
                             ..
                         } = activation.connection_activation_state()
                         {
-                            *image.lock().unwrap() =
+                            *lock_or_recover(image) =
                                 Some(DecodedImage::new(PixelFormat::BgrA32, desktop_size.width, desktop_size.height));
                             if !active_stage.reactivate(
                                 activation.io_channel_id(),

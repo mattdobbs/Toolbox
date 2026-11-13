@@ -28,22 +28,28 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         super.init(window: window)
         window.delegate = self
 
-        let sidebar = NSHostingController(rootView: SidebarView(
+        let sidebar = SidebarOutlineController(
             model: AppModel.shared,
             actions: SidebarActions(
                 openConnection: { [weak self] in self?.open($0) },
-                editConnection: { [weak self] in self?.edit($0) },
+                browseFiles: { [weak self] in self?.openFiles($0) },
+                editConnection: { [weak self] in self?.edit($0, inFolder: $1) },
                 deleteConnection: { [weak self] in self?.delete($0) },
-                editCredential: { [weak self] in self?.editCredential($0) },
+                editCredential: { [weak self] in self?.editCredential($0, inFolder: $1) },
                 deleteCredential: { [weak self] in self?.deleteCredential($0) },
-                editProvider: { [weak self] in self?.editProvider($0) },
+                editProvider: { [weak self] in self?.editProvider($0, inFolder: $1) },
                 deleteProvider: { [weak self] in self?.deleteProvider($0) },
-                syncProvider: { [weak self] in self?.syncProvider($0) }
+                syncProvider: { [weak self] in self?.syncProvider($0) },
+                newFolder: { [weak self] in self?.newFolder(in: $0) },
+                renameFolder: { [weak self] in self?.renameFolder($0) },
+                deleteFolder: { [weak self] in self?.deleteFolder($0) }
             )
-        ))
+        )
+        sidebar.expandAllOnLoad = CommandLine.arguments.contains("--expand-all")
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
         sidebarItem.minimumThickness = 220
-        sidebarItem.maximumThickness = 420
+        sidebarItem.maximumThickness = 520
+        sidebarItem.preferredThicknessFraction = 0.25
         sidebarItem.canCollapse = true
         let content = NSSplitViewItem(viewController: paneVC)
         content.minimumThickness = 420
@@ -62,6 +68,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         window.toolbar = toolbar
 
         paneVC.onLayoutChange = { [weak self] in self?.window?.toolbar?.validateVisibleItems() }
+        paneVC.onOpenConnection = { [weak self] connection, pane in self?.open(connection, in: pane) }
+        paneVC.contextMenuProvider = { [weak self] pane in self?.paneMenu(for: pane) }
     }
 
     @available(*, unavailable)
@@ -69,8 +77,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
 
     // MARK: Connections
 
-    func open(_ connection: Connection) {
-        let pane = paneVC.paneForNewSession()
+    /// Opens a connection in `pane`, or in the pane a new session should use.
+    func open(_ connection: Connection, in target: PaneView? = nil) {
+        let pane = target ?? paneVC.paneForNewSession()
         switch connection.kind {
         case .ssh:
             let session = TerminalSessionView(connection: connection)
@@ -120,6 +129,45 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         }
     }
 
+    /// Opens an SFTP browser for an SSH connection in a new pane.
+    func openFiles(_ connection: Connection) {
+        guard connection.kind == .ssh else {
+            Prompts.info(title: "File browsing needs SSH", message: "SFTP runs over SSH; this connection is \(connection.kind.label).")
+            return
+        }
+        let pane = paneVC.paneForNewSession()
+        let files = SftpPaneView(connection: connection)
+        pane.setContent(files)
+        paneVC.setFocus(pane.id, makeFirstResponder: true)
+        Task { @MainActor in
+            do {
+                guard let resolved = try await CredentialResolver.sshAuth(for: connection) else {
+                    files.cancelled()
+                    return
+                }
+                files.start(username: resolved.username, auth: resolved.auth)
+            } catch {
+                files.failed(describe(error))
+            }
+        }
+    }
+
+    /// The connection behind the focused pane, if any.
+    private var focusedConnection: Connection? {
+        switch paneVC.focusedPane.content {
+        case let terminal as TerminalSessionView: return terminal.connection
+        case let files as SftpPaneView: return files.connection
+        case let rdp as RdpSessionView: return rdp.connection
+        case let vnc as VncSessionView: return vnc.connection
+        default: return nil
+        }
+    }
+
+    @objc func browseFiles(_ sender: Any?) {
+        guard let connection = focusedConnection else { return }
+        openFiles(connection)
+    }
+
     private func presentSheet<Content: View>(_ content: Content) {
         guard editorSheet == nil else { return }
         let sheet = NSWindow(contentViewController: NSHostingController(rootView: content))
@@ -128,11 +176,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         window?.beginSheet(sheet)
     }
 
-    func edit(_ connection: Connection?) {
+    func edit(_ connection: Connection?, inFolder folder: String? = nil) {
         guard editorSheet == nil else { return }
+        var draft = connection.map(ConnectionDraft.init) ?? ConnectionDraft()
+        if connection == nil, let folder { draft.folder = folder }
         let editor = ConnectionEditorView(
             model: AppModel.shared,
-            draft: connection.map(ConnectionDraft.init) ?? ConnectionDraft(),
+            draft: draft,
             onSave: { [weak self] result in
                 guard let self else { return }
                 do {
@@ -149,9 +199,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
 
     // MARK: Credentials
 
-    func editCredential(_ credential: Credential?) {
+    func editCredential(_ credential: Credential?, inFolder folder: String? = nil) {
+        var draft = credential.map(CredentialDraft.init) ?? CredentialDraft()
+        if credential == nil, let folder { draft.folder = folder }
         let editor = CredentialEditorView(
-            draft: credential.map(CredentialDraft.init) ?? CredentialDraft(),
+            draft: draft,
             onSave: { [weak self] record, secret in
                 guard let self else { return }
                 Task { @MainActor in
@@ -185,10 +237,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
 
     // MARK: Providers
 
-    func editProvider(_ provider: Provider?) {
+    func editProvider(_ provider: Provider?, inFolder folder: String? = nil) {
+        var draft = provider.map(ProviderDraft.init) ?? ProviderDraft()
+        if provider == nil, let folder { draft.parent = folder }
         let editor = ProviderEditorView(
             model: AppModel.shared,
-            draft: provider.map(ProviderDraft.init) ?? ProviderDraft(),
+            draft: draft,
             onSave: { [weak self] record, syncNow in
                 guard let self else { return }
                 do {
@@ -223,6 +277,41 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         }
     }
 
+    // MARK: Folders
+
+    func newFolder(in parent: String?) {
+        let location = parent.map { "Inside \(($0 as NSString).lastPathComponent)" } ?? "At the top level"
+        guard let name = Prompts.askText(title: "New Folder", message: location, initial: "untitled folder", ok: "Create"),
+              !name.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        do {
+            try AppModel.shared.addFolder(parent.map { "\($0)/\(name)" } ?? name)
+        } catch {
+            Prompts.error(title: "Couldn't create the folder", message: describe(error))
+        }
+    }
+
+    func renameFolder(_ path: String) {
+        let leaf = (path as NSString).lastPathComponent
+        let parent = (path as NSString).deletingLastPathComponent
+        guard let name = Prompts.askText(title: "Rename Folder", message: path, initial: leaf, ok: "Rename"),
+              !name.trimmingCharacters(in: .whitespaces).isEmpty, name != leaf else { return }
+        do {
+            try AppModel.shared.renameFolder(path, to: parent.isEmpty ? name : "\(parent)/\(name)")
+        } catch {
+            Prompts.error(title: "Couldn't rename the folder", message: describe(error))
+        }
+    }
+
+    func deleteFolder(_ path: String) {
+        guard Prompts.confirm(title: "Delete folder “\((path as NSString).lastPathComponent)”?",
+                              message: "Only empty folders can be deleted.", ok: "Delete") else { return }
+        do {
+            try AppModel.shared.deleteFolder(path)
+        } catch {
+            Prompts.error(title: "Couldn't delete the folder", message: describe(error))
+        }
+    }
+
     private func endEditor() {
         guard let sheet = editorSheet else { return }
         window?.endSheet(sheet)
@@ -238,6 +327,59 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         } catch {
             Prompts.error(title: "Couldn't delete the connection", message: describe(error))
         }
+    }
+
+    // MARK: Workspaces
+
+    private var otherWorkspaces: [WorkspaceWindowController] {
+        ((NSApp.delegate as? AppDelegate)?.workspaces ?? []).filter { $0 !== self }
+    }
+
+    /// Moves a pane's session into another workspace, keeping it running.
+    func movePane(_ pane: PaneView, to target: WorkspaceWindowController) {
+        guard target !== self, let content = paneVC.lift(pane) else { return }
+        target.paneVC.adopt(content)
+        target.window?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc func movePaneToNewWorkspace(_ sender: Any?) {
+        let pane = paneVC.focusedPane
+        guard pane.content != nil, let delegate = NSApp.delegate as? AppDelegate else { return }
+        let target = delegate.newWorkspaceWindow(asTab: true)
+        movePane(pane, to: target)
+    }
+
+    @objc func movePaneToWorkspace(_ sender: NSMenuItem) {
+        guard let target = sender.representedObject as? WorkspaceWindowController else { return }
+        movePane(paneVC.focusedPane, to: target)
+    }
+
+    /// Header context menu: where to send the pane, and close.
+    private func paneMenu(for pane: PaneView) -> NSMenu? {
+        guard pane.content != nil else { return nil }
+        let menu = NSMenu()
+        let toNew = NSMenuItem(title: "Move to New Workspace", action: #selector(movePaneToNewWorkspace(_:)), keyEquivalent: "")
+        toNew.target = self
+        menu.addItem(toNew)
+        let others = otherWorkspaces
+        if !others.isEmpty {
+            let submenu = NSMenu(title: "Move to Workspace")
+            for workspace in others {
+                let item = NSMenuItem(title: workspace.window?.title ?? "Workspace",
+                                      action: #selector(movePaneToWorkspace(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = workspace
+                submenu.addItem(item)
+            }
+            let parent = NSMenuItem(title: "Move to Workspace", action: nil, keyEquivalent: "")
+            parent.submenu = submenu
+            menu.addItem(parent)
+        }
+        menu.addItem(.separator())
+        let close = NSMenuItem(title: "Close Pane", action: #selector(closePane(_:)), keyEquivalent: "")
+        close.target = self
+        menu.addItem(close)
+        return menu
     }
 
     // MARK: Actions (menu + toolbar)
@@ -274,13 +416,20 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(closePane(_:)): return canClosePane
+        case #selector(browseFiles(_:)): return focusedConnection?.kind == .ssh
+        case #selector(movePaneToNewWorkspace(_:)), #selector(movePaneToWorkspace(_:)):
+            return paneVC.focusedPane.content != nil
         case #selector(focusNextPane(_:)), #selector(focusPreviousPane(_:)): return paneVC.paneCount > 1
         default: return true
         }
     }
 
     func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
-        item.itemIdentifier == Self.closePaneItem ? canClosePane : true
+        switch item.itemIdentifier {
+        case Self.closePaneItem: return canClosePane
+        case Self.browseFilesItem: return focusedConnection?.kind == .ssh
+        default: return true
+        }
     }
 
     // MARK: NSWindowDelegate
@@ -304,10 +453,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     private static let splitRightItem = NSToolbarItem.Identifier("splitRight")
     private static let splitDownItem = NSToolbarItem.Identifier("splitDown")
     private static let closePaneItem = NSToolbarItem.Identifier("closePane")
+    private static let browseFilesItem = NSToolbarItem.Identifier("browseFiles")
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [.toggleSidebar, .sidebarTrackingSeparator, Self.newConnectionItem, .flexibleSpace,
-         Self.splitRightItem, Self.splitDownItem, Self.closePaneItem]
+         Self.browseFilesItem, Self.splitRightItem, Self.splitDownItem, Self.closePaneItem]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -319,6 +469,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         switch id {
         case Self.newConnectionItem:
             return toolbarItem(id, symbol: "plus", label: "New Connection", action: #selector(newConnection(_:)))
+        case Self.browseFilesItem:
+            return toolbarItem(id, symbol: "folder", label: "Browse Files", action: #selector(browseFiles(_:)))
         case Self.splitRightItem:
             return toolbarItem(id, symbol: "rectangle.split.2x1", label: "Split Right", action: #selector(splitRight(_:)))
         case Self.splitDownItem:

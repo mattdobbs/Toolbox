@@ -17,7 +17,8 @@ use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::error::CoreError;
+use crate::error::{lock_or_recover, CoreError};
+use crate::store::restrict_permissions;
 
 const VAULT_VERSION: u32 = 1;
 const KEY_LEN: usize = 32;
@@ -27,12 +28,22 @@ const CANARY_ID: &str = "__canary";
 const CANARY_TEXT: &str = "toolbox-vault-ok";
 
 /// What a credential can hold. Any field may be absent.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct Secret {
     pub password: Option<String>,
     /// Private key file content (OpenSSH, PEM or PuTTY format).
     pub private_key: Option<String>,
     pub passphrase: Option<String>,
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Secret")
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("private_key", &self.private_key.as_ref().map(|_| "<redacted>"))
+            .field("passphrase", &self.passphrase.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,7 +90,7 @@ impl Vault {
     }
 
     pub fn is_unlocked(&self) -> bool {
-        self.key.lock().unwrap().is_some()
+        lock_or_recover(&self.key).is_some()
     }
 
     /// Number of stored secrets (excluding the internal check entry).
@@ -100,9 +111,9 @@ impl Vault {
             return Err(CoreError::Invalid(format!("vault key must be {KEY_LEN} bytes")));
         }
         let key = Zeroizing::new(key);
-        let has_canary = self.doc.lock().unwrap().entries.contains_key(CANARY_ID);
+        let has_canary = lock_or_recover(&self.doc).entries.contains_key(CANARY_ID);
         if has_canary {
-            let entry = self.doc.lock().unwrap().entries[CANARY_ID].clone();
+            let entry = lock_or_recover(&self.doc).entries[CANARY_ID].clone();
             let plain = decrypt(&key, CANARY_ID, &entry)
                 .map_err(|_| CoreError::Auth("wrong vault key".into()))?;
             if plain != CANARY_TEXT.as_bytes() {
@@ -110,20 +121,20 @@ impl Vault {
             }
         } else {
             let entry = encrypt(&key, CANARY_ID, CANARY_TEXT.as_bytes())?;
-            let mut doc = self.doc.lock().unwrap();
+            let mut doc = lock_or_recover(&self.doc);
             doc.entries.insert(CANARY_ID.to_string(), entry);
             write_document(&self.path, &doc)?;
         }
-        *self.key.lock().unwrap() = Some(key);
+        *lock_or_recover(&self.key) = Some(key);
         Ok(())
     }
 
     pub fn lock(&self) {
-        *self.key.lock().unwrap() = None;
+        *lock_or_recover(&self.key) = None;
     }
 
     pub fn has_secret(&self, id: String) -> bool {
-        id != CANARY_ID && self.doc.lock().unwrap().entries.contains_key(&id)
+        id != CANARY_ID && lock_or_recover(&self.doc).entries.contains_key(&id)
     }
 
     pub fn set_secret(&self, id: String, secret: Secret) -> Result<(), CoreError> {
@@ -133,7 +144,7 @@ impl Vault {
         let key = self.current_key()?;
         let plain = Zeroizing::new(serde_json::to_vec(&secret)?);
         let entry = encrypt(&key, &id, &plain)?;
-        let mut doc = self.doc.lock().unwrap();
+        let mut doc = lock_or_recover(&self.doc);
         doc.entries.insert(id, entry);
         write_document(&self.path, &doc)
     }
@@ -153,7 +164,7 @@ impl Vault {
     }
 
     pub fn delete_secret(&self, id: String) -> Result<bool, CoreError> {
-        let mut doc = self.doc.lock().unwrap();
+        let mut doc = lock_or_recover(&self.doc);
         let removed = doc.entries.remove(&id).is_some();
         if removed {
             write_document(&self.path, &doc)?;
@@ -216,6 +227,7 @@ fn write_document(path: &Path, doc: &Document) -> Result<(), CoreError> {
     };
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, serde_json::to_string_pretty(&out)?)?;
+    restrict_permissions(&tmp)?;
     fs::rename(&tmp, path)?;
     Ok(())
 }

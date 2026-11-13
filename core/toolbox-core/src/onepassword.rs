@@ -25,11 +25,21 @@ pub struct OpItem {
 }
 
 /// The parts of an item a connection can use.
-#[derive(Debug, Clone, Default, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Default, PartialEq, Eq, uniffi::Record)]
 pub struct ResolvedCredential {
     pub username: Option<String>,
     pub password: Option<String>,
     pub private_key: Option<String>,
+}
+
+impl std::fmt::Debug for ResolvedCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedCredential")
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("private_key", &self.private_key.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 const CANDIDATE_PATHS: [&str; 2] = ["/opt/homebrew/bin/op", "/usr/local/bin/op"];
@@ -130,8 +140,7 @@ async fn run_op(op_path: &Path, args: &[String]) -> Result<String, CoreError> {
     let message = stderr
         .lines()
         .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .last()
+        .rfind(|l| !l.is_empty())
         .unwrap_or("unknown error")
         .to_string();
     Err(CoreError::Auth(format!("1Password: {message}")))

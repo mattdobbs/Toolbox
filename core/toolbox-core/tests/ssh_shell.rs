@@ -81,6 +81,11 @@ impl server::Handler for EchoServer {
     }
 
     async fn data(&mut self, channel: ChannelId, data: &[u8], session: &mut Session) -> Result<(), Self::Error> {
+        if data == [3] {
+            session.eof(channel)?;
+            session.close(channel)?;
+            return Ok(());
+        }
         let mut out = b"echo:".to_vec();
         out.extend_from_slice(data);
         session.data(channel, out)?;
@@ -124,6 +129,7 @@ fn start_server(rt: &tokio::runtime::Runtime) -> (u16, Arc<Mutex<ServerState>>) 
 struct Recorded {
     connected: AtomicBool,
     closed: AtomicBool,
+    clean: AtomicBool,
     data: Mutex<Vec<u8>>,
     errors: Mutex<Vec<String>>,
     host_key_prompts: AtomicUsize,
@@ -143,7 +149,8 @@ impl SshListener for Recorder {
     fn on_error(&self, message: String) {
         self.0.errors.lock().unwrap().push(message);
     }
-    fn on_closed(&self) {
+    fn on_closed(&self, clean: bool) {
+        self.0.clean.store(clean, SeqCst);
         self.0.closed.store(true, SeqCst);
     }
     fn confirm_host_key(&self, _host: String, _port: u16, _key_type: String, fingerprint: String) -> bool {
@@ -213,6 +220,7 @@ fn password_shell_roundtrip_and_host_key_learning() {
     session.close();
     wait_until("close", || seen.closed.load(SeqCst));
     assert!(session.is_closed());
+    assert!(seen.clean.load(SeqCst), "closing from our side is a clean end");
     assert!(seen.errors.lock().unwrap().is_empty(), "{:?}", seen.errors.lock().unwrap());
 
     // The host key was unknown, so we were asked once and it was recorded.
@@ -242,9 +250,25 @@ fn wrong_password_reports_auth_error() {
 
     wait_until("closed", || seen.closed.load(SeqCst));
     assert!(!seen.connected.load(SeqCst));
+    assert!(!seen.clean.load(SeqCst), "a failed login is not a clean end");
     let errors = seen.errors.lock().unwrap().clone();
     assert_eq!(errors.len(), 1, "{errors:?}");
     assert!(errors[0].contains("authentication failed"), "{errors:?}");
+}
+
+#[test]
+fn remote_logout_ends_cleanly() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (port, _) = start_server(&rt);
+    let dir = tempfile::tempdir().unwrap();
+    let (seen, listener) = recorder(true);
+    let session = SshSession::connect(config(port, "secret", &dir.path().join("kh")), listener);
+    wait_until("connect", || seen.connected.load(SeqCst));
+    // Ctrl-C makes the echo server close the channel from its side.
+    session.write(vec![3]);
+    wait_until("remote close", || seen.closed.load(SeqCst));
+    assert!(seen.clean.load(SeqCst), "the server hanging up is a clean end");
+    assert!(seen.errors.lock().unwrap().is_empty());
 }
 
 #[test]

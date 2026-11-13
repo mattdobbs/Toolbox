@@ -1,8 +1,10 @@
 import AppKit
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, NSMenuDelegate {
     private var controllers: [WorkspaceWindowController] = []
+
+    var workspaces: [WorkspaceWindowController] { controllers }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         MainMenu.install()
@@ -27,16 +29,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         VaultManager.shared.lock()
     }
 
-    /// `Toolbox --connect <name or id>` opens that connection on launch.
+    /// `Toolbox --connect <name or id>` opens that connection on launch;
+    /// `--files <name or id>` opens its SFTP browser.
     private func openConnectionFromArguments(in controller: WorkspaceWindowController) {
         let args = CommandLine.arguments
-        guard let flag = args.firstIndex(of: "--connect"), flag + 1 < args.count else { return }
-        let wanted = args[flag + 1]
-        guard let connection = AppModel.shared.connections.first(where: { $0.id == wanted || $0.name == wanted }) else {
-            NSLog("--connect: no connection named \(wanted)")
-            return
+        for (index, flag) in args.enumerated() where index + 1 < args.count {
+            let wanted = args[index + 1]
+            let action: ((Connection) -> Void)?
+            switch flag {
+            case "--connect": action = { controller.open($0) }
+            case "--files": action = { controller.openFiles($0) }
+            default: action = nil
+            }
+            guard let action else { continue }
+            guard let connection = AppModel.shared.connections.first(where: { $0.id == wanted || $0.name == wanted }) else {
+                NSLog("\(flag): no connection named \(wanted)")
+                continue
+            }
+            action(connection)
         }
-        controller.open(connection)
+        // Testing aid: move the focused pane into a fresh workspace tab.
+        if args.contains("--demo-move") {
+            controller.movePaneToNewWorkspace(nil)
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -86,7 +101,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
+        // Workspaces are tabs; keep the bar visible so the "+" is always there.
+        if let window = controller.window, let group = window.tabGroup, !group.isTabBarVisible {
+            window.toggleTabBar(nil)
+        }
         return controller
+    }
+
+    /// Fills the "Move Pane to Workspace" submenu with the other workspaces.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let current = (NSApp.keyWindow?.windowController as? WorkspaceWindowController)
+            ?? (NSApp.mainWindow?.windowController as? WorkspaceWindowController)
+        for workspace in controllers where workspace !== current {
+            let item = NSMenuItem(title: workspace.window?.title ?? "Workspace",
+                                  action: #selector(WorkspaceWindowController.movePaneToWorkspace(_:)),
+                                  keyEquivalent: "")
+            item.representedObject = workspace
+            menu.addItem(item)
+        }
+        if menu.items.isEmpty {
+            let none = NSMenuItem(title: "No Other Workspaces", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            menu.addItem(none)
+        }
     }
 
     func windowControllerDidClose(_ controller: WorkspaceWindowController) {

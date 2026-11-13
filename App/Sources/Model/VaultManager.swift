@@ -4,12 +4,15 @@ import Security
 
 enum VaultError: LocalizedError {
     case cancelled
+    case unavailable(String)
     case keychain(OSStatus)
 
     var errorDescription: String? {
         switch self {
         case .cancelled:
             return "Vault unlock was cancelled."
+        case .unavailable(let reason):
+            return "The vault can't be unlocked on this Mac: \(reason)"
         case .keychain(let status):
             let text = SecCopyErrorMessageString(status, nil) as String? ?? "status \(status)"
             return "Keychain error: \(text)"
@@ -46,7 +49,11 @@ final class VaultManager {
             let broken = url.deletingPathExtension().appendingPathExtension("broken-\(stamp).json")
             try? FileManager.default.moveItem(at: url, to: broken)
             NSLog("vault.json could not be read (\(error)); moved to \(broken.path)")
-            return try! Vault.open(path: url.path)
+            if let fresh = try? Vault.open(path: url.path) {
+                return fresh
+            }
+            let temp = FileManager.default.temporaryDirectory.appendingPathComponent("toolbox-vault.json")
+            return try! Vault.open(path: temp.path)
         }
     }
 
@@ -79,8 +86,8 @@ final class VaultManager {
         context.localizedCancelTitle = "Cancel"
         var unavailable: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &unavailable) else {
-            // No Touch ID or password configured: nothing to check against.
-            return
+            // Refuse rather than silently skipping the owner check.
+            throw VaultError.unavailable(unavailable?.localizedDescription ?? "no login password or Touch ID is set up")
         }
         let ok = try await context.evaluatePolicy(.deviceOwnerAuthentication,
                                                   localizedReason: "unlock the Toolbox vault")

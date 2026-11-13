@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::ad;
-use crate::error::CoreError;
+use crate::error::{lock_or_recover, CoreError};
 use crate::onepassword;
 
 const DOCUMENT_VERSION: u32 = 2;
@@ -136,10 +136,19 @@ pub struct Provider {
 }
 
 /// Bind credentials for a sync, resolved by the app beforehand.
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Clone, uniffi::Record)]
 pub struct BindCredentials {
     pub username: String,
     pub password: String,
+}
+
+impl std::fmt::Debug for BindCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BindCredentials")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -159,6 +168,10 @@ struct Document {
     credentials: Vec<Credential>,
     #[serde(default)]
     providers: Vec<Provider>,
+    /// Folder paths that exist on their own, so an empty folder survives.
+    /// Slash-separated, e.g. `ACME/Jump Boxes`.
+    #[serde(default)]
+    folders: Vec<String>,
 }
 
 #[derive(uniffi::Object)]
@@ -192,11 +205,11 @@ impl ConnectionStore {
     // ----- connections -----
 
     pub fn list(&self) -> Vec<Connection> {
-        self.doc.lock().unwrap().connections.clone()
+        lock_or_recover(&self.doc).connections.clone()
     }
 
     pub fn get(&self, id: String) -> Option<Connection> {
-        self.doc.lock().unwrap().connections.iter().find(|c| c.id == id).cloned()
+        lock_or_recover(&self.doc).connections.iter().find(|c| c.id == id).cloned()
     }
 
     /// Inserts or replaces a connection. An empty `id` gets a fresh one.
@@ -210,7 +223,13 @@ impl ConnectionStore {
         if connection.id.trim().is_empty() {
             connection.id = new_id();
         }
-        let mut doc = self.doc.lock().unwrap();
+        connection.folder = connection.folder.as_deref().and_then(normalize_folder);
+        let mut doc = lock_or_recover(&self.doc);
+        if connection.source.is_none() {
+            if let Some(folder) = &connection.folder {
+                register_folder(&mut doc, folder);
+            }
+        }
         match doc.connections.iter_mut().find(|c| c.id == connection.id) {
             Some(existing) => *existing = connection.clone(),
             None => doc.connections.push(connection.clone()),
@@ -221,7 +240,7 @@ impl ConnectionStore {
     }
 
     pub fn delete(&self, id: String) -> Result<bool, CoreError> {
-        let mut doc = self.doc.lock().unwrap();
+        let mut doc = lock_or_recover(&self.doc);
         let before = doc.connections.len();
         doc.connections.retain(|c| c.id != id);
         let removed = doc.connections.len() != before;
@@ -234,11 +253,11 @@ impl ConnectionStore {
     // ----- credentials -----
 
     pub fn list_credentials(&self) -> Vec<Credential> {
-        self.doc.lock().unwrap().credentials.clone()
+        lock_or_recover(&self.doc).credentials.clone()
     }
 
     pub fn get_credential(&self, id: String) -> Option<Credential> {
-        self.doc.lock().unwrap().credentials.iter().find(|c| c.id == id).cloned()
+        lock_or_recover(&self.doc).credentials.iter().find(|c| c.id == id).cloned()
     }
 
     pub fn upsert_credential(&self, mut credential: Credential) -> Result<Credential, CoreError> {
@@ -253,7 +272,13 @@ impl ConnectionStore {
         if credential.id.trim().is_empty() {
             credential.id = new_id();
         }
-        let mut doc = self.doc.lock().unwrap();
+        credential.folder = credential.folder.as_deref().and_then(normalize_folder);
+        let mut doc = lock_or_recover(&self.doc);
+        if credential.source.is_none() {
+            if let Some(folder) = &credential.folder {
+                register_folder(&mut doc, folder);
+            }
+        }
         match doc.credentials.iter_mut().find(|c| c.id == credential.id) {
             Some(existing) => *existing = credential.clone(),
             None => doc.credentials.push(credential.clone()),
@@ -264,7 +289,7 @@ impl ConnectionStore {
     }
 
     pub fn delete_credential(&self, id: String) -> Result<bool, CoreError> {
-        let mut doc = self.doc.lock().unwrap();
+        let mut doc = lock_or_recover(&self.doc);
         let before = doc.credentials.len();
         doc.credentials.retain(|c| c.id != id);
         let removed = doc.credentials.len() != before;
@@ -289,11 +314,11 @@ impl ConnectionStore {
     // ----- providers -----
 
     pub fn list_providers(&self) -> Vec<Provider> {
-        self.doc.lock().unwrap().providers.clone()
+        lock_or_recover(&self.doc).providers.clone()
     }
 
     pub fn get_provider(&self, id: String) -> Option<Provider> {
-        self.doc.lock().unwrap().providers.iter().find(|p| p.id == id).cloned()
+        lock_or_recover(&self.doc).providers.iter().find(|p| p.id == id).cloned()
     }
 
     pub fn upsert_provider(&self, mut provider: Provider) -> Result<Provider, CoreError> {
@@ -308,21 +333,37 @@ impl ConnectionStore {
                 return Err(CoreError::Invalid("search base is required".into()));
             }
         }
-        if provider.folder.trim().is_empty() {
-            provider.folder = provider.name.trim().to_string();
-        }
+        provider.folder = normalize_folder(&provider.folder)
+            .or_else(|| normalize_folder(&provider.name))
+            .ok_or_else(|| CoreError::Invalid("name is required".into()))?;
         if provider.id.trim().is_empty() {
             provider.id = new_id();
         }
-        let mut doc = self.doc.lock().unwrap();
-        match doc.providers.iter_mut().find(|p| p.id == provider.id) {
-            Some(existing) => {
+        let mut doc = lock_or_recover(&self.doc);
+        if let Some(parent) = parent_path(&provider.folder) {
+            register_folder(&mut doc, &parent);
+        }
+        let existing = doc.providers.iter().position(|p| p.id == provider.id);
+        match existing {
+            Some(index) => {
+                let old = doc.providers[index].clone();
                 // Keep sync bookkeeping unless the caller supplied it.
                 if provider.last_sync_epoch.is_none() {
-                    provider.last_sync_epoch = existing.last_sync_epoch;
-                    provider.last_status = existing.last_status.clone();
+                    provider.last_sync_epoch = old.last_sync_epoch;
+                    provider.last_status = old.last_status.clone();
                 }
-                *existing = provider.clone();
+                // Generated objects follow a provider whose folder was renamed.
+                if old.folder != provider.folder {
+                    let (from, to) = (old.folder.clone(), provider.folder.clone());
+                    let id = provider.id.clone();
+                    for c in doc.connections.iter_mut().filter(|c| c.source.as_deref() == Some(id.as_str())) {
+                        c.folder = c.folder.as_deref().and_then(|f| replace_prefix(f, &from, &to));
+                    }
+                    for c in doc.credentials.iter_mut().filter(|c| c.source.as_deref() == Some(id.as_str())) {
+                        c.folder = c.folder.as_deref().and_then(|f| replace_prefix(f, &from, &to));
+                    }
+                }
+                doc.providers[index] = provider.clone();
             }
             None => doc.providers.push(provider.clone()),
         }
@@ -333,7 +374,7 @@ impl ConnectionStore {
 
     /// Removes a provider and everything it generated.
     pub fn delete_provider(&self, id: String) -> Result<bool, CoreError> {
-        let mut doc = self.doc.lock().unwrap();
+        let mut doc = lock_or_recover(&self.doc);
         let before = doc.providers.len();
         doc.providers.retain(|p| p.id != id);
         let removed = doc.providers.len() != before;
@@ -343,6 +384,175 @@ impl ConnectionStore {
             write_document(&self.path, &doc)?;
         }
         Ok(removed)
+    }
+
+    // ----- folders -----
+
+    /// Folders that exist in their own right (empty ones included), sorted.
+    pub fn list_folders(&self) -> Vec<String> {
+        lock_or_recover(&self.doc).folders.clone()
+    }
+
+    /// Creates a folder (and its ancestors). Returns the normalized path.
+    pub fn add_folder(&self, path: String) -> Result<String, CoreError> {
+        let path = normalize_folder(&path).ok_or_else(|| CoreError::Invalid("folder name is required".into()))?;
+        let mut doc = lock_or_recover(&self.doc);
+        register_folder(&mut doc, &path);
+        write_document(&self.path, &doc)?;
+        Ok(path)
+    }
+
+    /// Renames or moves a folder; everything inside follows.
+    pub fn rename_folder(&self, from: String, to: String) -> Result<String, CoreError> {
+        let from = normalize_folder(&from).ok_or_else(|| CoreError::Invalid("folder is required".into()))?;
+        let to = normalize_folder(&to).ok_or_else(|| CoreError::Invalid("new name is required".into()))?;
+        if to == from {
+            return Ok(to);
+        }
+        if to.starts_with(&format!("{from}/")) {
+            return Err(CoreError::Invalid("a folder cannot be moved into itself".into()));
+        }
+        let mut doc = lock_or_recover(&self.doc);
+        for folder in doc.folders.iter_mut() {
+            if let Some(renamed) = replace_prefix(folder, &from, &to) {
+                *folder = renamed;
+            }
+        }
+        for c in doc.connections.iter_mut() {
+            if let Some(renamed) = c.folder.as_deref().and_then(|f| replace_prefix(f, &from, &to)) {
+                c.folder = Some(renamed);
+            }
+        }
+        for c in doc.credentials.iter_mut() {
+            if let Some(renamed) = c.folder.as_deref().and_then(|f| replace_prefix(f, &from, &to)) {
+                c.folder = Some(renamed);
+            }
+        }
+        for p in doc.providers.iter_mut() {
+            if let Some(renamed) = replace_prefix(&p.folder, &from, &to) {
+                p.folder = renamed;
+            }
+        }
+        if let Some(parent) = parent_path(&to) {
+            register_folder(&mut doc, &parent);
+        }
+        doc.folders.sort();
+        doc.folders.dedup();
+        sort_document(&mut doc);
+        write_document(&self.path, &doc)?;
+        Ok(to)
+    }
+
+    /// Removes an empty folder. Anything inside has to be moved or deleted first.
+    pub fn delete_folder(&self, path: String) -> Result<(), CoreError> {
+        let path = normalize_folder(&path).ok_or_else(|| CoreError::Invalid("folder is required".into()))?;
+        let mut doc = lock_or_recover(&self.doc);
+        let inside = |f: Option<&str>| f.map(|f| f == path || f.starts_with(&format!("{path}/"))).unwrap_or(false);
+        let occupied = doc.connections.iter().any(|c| inside(c.folder.as_deref()))
+            || doc.credentials.iter().any(|c| inside(c.folder.as_deref()))
+            || doc.providers.iter().any(|p| inside(Some(&p.folder)));
+        if occupied {
+            return Err(CoreError::Invalid(format!("“{path}” is not empty; move or delete its contents first")));
+        }
+        doc.folders.retain(|f| !inside(Some(f)));
+        write_document(&self.path, &doc)?;
+        Ok(())
+    }
+
+    /// Moves a connection into a folder (`None` for the top level).
+    /// Generated connections stay with their provider.
+    pub fn move_connection(&self, id: String, folder: Option<String>) -> Result<(), CoreError> {
+        let folder = folder.as_deref().and_then(normalize_folder);
+        let mut doc = lock_or_recover(&self.doc);
+        let connection = doc
+            .connections
+            .iter_mut()
+            .find(|c| c.id == id)
+            .ok_or_else(|| CoreError::Invalid("no such connection".into()))?;
+        if connection.source.is_some() {
+            return Err(CoreError::Invalid("generated connections stay with their provider".into()));
+        }
+        connection.folder = folder.clone();
+        if let Some(folder) = &folder {
+            register_folder(&mut doc, folder);
+        }
+        sort_document(&mut doc);
+        write_document(&self.path, &doc)
+    }
+
+    pub fn move_credential(&self, id: String, folder: Option<String>) -> Result<(), CoreError> {
+        let folder = folder.as_deref().and_then(normalize_folder);
+        let mut doc = lock_or_recover(&self.doc);
+        let credential = doc
+            .credentials
+            .iter_mut()
+            .find(|c| c.id == id)
+            .ok_or_else(|| CoreError::Invalid("no such credential".into()))?;
+        if credential.source.is_some() {
+            return Err(CoreError::Invalid("generated credentials stay with their provider".into()));
+        }
+        credential.folder = folder.clone();
+        if let Some(folder) = &folder {
+            register_folder(&mut doc, folder);
+        }
+        sort_document(&mut doc);
+        write_document(&self.path, &doc)
+    }
+
+    /// Moves a provider (with everything it generated) under `parent`.
+    pub fn move_provider(&self, id: String, parent: Option<String>) -> Result<(), CoreError> {
+        let provider = self
+            .get_provider(id)
+            .ok_or_else(|| CoreError::Invalid("no such provider".into()))?;
+        let leaf = provider.folder.rsplit('/').next().unwrap_or(&provider.folder).to_string();
+        let target = match parent.as_deref().and_then(normalize_folder) {
+            Some(parent) => format!("{parent}/{leaf}"),
+            None => leaf,
+        };
+        self.rename_folder(provider.folder, target).map(|_| ())
+    }
+}
+
+/// Trims each path component and drops empty ones; `None` when nothing is left.
+pub fn normalize_folder(path: &str) -> Option<String> {
+    let parts: Vec<&str> = path
+        .split('/')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+fn parent_path(path: &str) -> Option<String> {
+    path.rsplit_once('/').map(|(parent, _)| parent.to_string())
+}
+
+/// Adds a folder and every ancestor to the explicit list.
+fn register_folder(doc: &mut Document, path: &str) {
+    let mut current = String::new();
+    for part in path.split('/') {
+        if !current.is_empty() {
+            current.push('/');
+        }
+        current.push_str(part);
+        if !doc.folders.iter().any(|f| f == &current) {
+            doc.folders.push(current.clone());
+        }
+    }
+    doc.folders.sort();
+}
+
+/// `path` with a leading `from` folder replaced by `to`, or `None` when it
+/// isn't inside `from`.
+fn replace_prefix(path: &str, from: &str, to: &str) -> Option<String> {
+    if path == from {
+        Some(to.to_string())
+    } else {
+        path.strip_prefix(&format!("{from}/")).map(|rest| format!("{to}/{rest}"))
     }
 }
 
@@ -411,7 +621,7 @@ impl ConnectionStore {
                     ProviderKind::OnePassword { .. } => format!("{} credentials", result.credentials),
                     ProviderKind::ActiveDirectory { .. } => format!("{} connections", result.connections),
                 };
-                let mut doc = self.doc.lock().unwrap();
+                let mut doc = lock_or_recover(&self.doc);
                 doc.connections.retain(|c| c.source.as_deref() != Some(id.as_str()));
                 doc.credentials.retain(|c| c.source.as_deref() != Some(id.as_str()));
                 doc.connections.extend(connections);
@@ -425,7 +635,7 @@ impl ConnectionStore {
                 Ok(result)
             }
             Err(e) => {
-                let mut doc = self.doc.lock().unwrap();
+                let mut doc = lock_or_recover(&self.doc);
                 if let Some(p) = doc.providers.iter_mut().find(|p| p.id == id) {
                     p.last_status = Some(format!("failed: {e}"));
                 }
@@ -491,8 +701,7 @@ fn sort_document(doc: &mut Document) {
         .sort_by(|a, b| by_folder_name(&a.folder, &b.folder, &a.name, &b.name));
     doc.credentials
         .sort_by(|a, b| by_folder_name(&a.folder, &b.folder, &a.name, &b.name));
-    doc.providers
-        .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    doc.providers.sort_by_key(|p| p.name.to_lowercase());
 }
 
 fn write_document(path: &Path, doc: &Document) -> Result<(), CoreError> {
@@ -504,13 +713,21 @@ fn write_document(path: &Path, doc: &Document) -> Result<(), CoreError> {
         connections: doc.connections.clone(),
         credentials: doc.credentials.clone(),
         providers: doc.providers.clone(),
+        folders: doc.folders.clone(),
     };
     let text = serde_json::to_string_pretty(&out)?;
     // Write to a sibling temp file then rename so a crash never truncates.
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, text)?;
+    restrict_permissions(&tmp)?;
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Owner read/write only: the document names hosts and accounts.
+pub(crate) fn restrict_permissions(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
 #[cfg(test)]
@@ -743,6 +960,58 @@ esac
         let synced = store.get_provider(provider.id).unwrap();
         assert!(synced.last_sync_epoch.is_some());
         assert_eq!(synced.last_status.as_deref(), Some("4 credentials"));
+    }
+
+    #[test]
+    fn folders_are_explicit_and_follow_renames() {
+        let (_dir, store) = open_temp();
+        assert_eq!(normalize_folder(" ACME / Jump Boxes /"), Some("ACME/Jump Boxes".into()));
+        assert_eq!(normalize_folder(" / "), None);
+
+        store.add_folder("ACME/Jump Boxes".into()).unwrap();
+        assert_eq!(store.list_folders(), vec!["ACME", "ACME/Jump Boxes"]);
+
+        let mut c = sample("jump01");
+        c.folder = Some("ACME/Jump Boxes".into());
+        let c = store.upsert(c).unwrap();
+        let provider = store
+            .upsert_provider(Provider {
+                id: "ad".into(),
+                name: "ACME-AD".into(),
+                kind: ProviderKind::OnePassword { op_path: None, account: None, vaults: vec![] },
+                folder: "ACME/ACME-AD".into(),
+                auto_refresh_minutes: 0,
+                last_sync_epoch: None,
+                last_status: None,
+            })
+            .unwrap();
+        let mut generated = sample("dc01");
+        generated.folder = Some("ACME/ACME-AD/Domain Controllers".into());
+        generated.source = Some(provider.id.clone());
+        let generated = store.upsert(generated).unwrap();
+        // Generated folders are derived, not explicit.
+        assert_eq!(store.list_folders(), vec!["ACME", "ACME/Jump Boxes"]);
+
+        // Rename the top folder: everything underneath follows.
+        assert_eq!(store.rename_folder("ACME".into(), "Work".into()).unwrap(), "Work");
+        assert_eq!(store.list_folders(), vec!["Work", "Work/Jump Boxes"]);
+        assert_eq!(store.get(c.id.clone()).unwrap().folder.as_deref(), Some("Work/Jump Boxes"));
+        assert_eq!(store.get_provider("ad".into()).unwrap().folder, "Work/ACME-AD");
+        assert_eq!(store.get(generated.id.clone()).unwrap().folder.as_deref(), Some("Work/ACME-AD/Domain Controllers"));
+        assert!(matches!(store.rename_folder("Work".into(), "Work/Inner".into()), Err(CoreError::Invalid(_))));
+
+        // Moving: manual items move, generated ones refuse, providers carry their output.
+        store.move_connection(c.id.clone(), None).unwrap();
+        assert_eq!(store.get(c.id.clone()).unwrap().folder, None);
+        assert!(matches!(store.move_connection(generated.id.clone(), None), Err(CoreError::Invalid(_))));
+        store.move_provider("ad".into(), Some("Archive".into())).unwrap();
+        assert_eq!(store.get_provider("ad".into()).unwrap().folder, "Archive/ACME-AD");
+        assert_eq!(store.get(generated.id).unwrap().folder.as_deref(), Some("Archive/ACME-AD/Domain Controllers"));
+
+        // Deleting: only empty folders go.
+        assert!(matches!(store.delete_folder("Archive".into()), Err(CoreError::Invalid(_))));
+        store.delete_folder("Work/Jump Boxes".into()).unwrap();
+        assert_eq!(store.list_folders(), vec!["Archive", "Work"]);
     }
 
     #[tokio::test]

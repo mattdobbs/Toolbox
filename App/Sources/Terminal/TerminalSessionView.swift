@@ -16,6 +16,7 @@ final class TerminalSessionView: NSView, PaneContent {
     private var askedForPassphrase = false
     private var metalEnabled = false
     private var pendingResize: DispatchWorkItem?
+    private var terminated = false
 
     // MARK: PaneContent
 
@@ -29,6 +30,7 @@ final class TerminalSessionView: NSView, PaneContent {
     var onTitleChange: ((String) -> Void)?
     var onStateChange: (() -> Void)?
     var onFocus: (() -> Void)?
+    var onSessionEnded: ((Bool) -> Void)?
 
     /// Creates the pane in a "resolving" state; call `start` once the
     /// credentials are known.
@@ -55,8 +57,10 @@ final class TerminalSessionView: NSView, PaneContent {
         feed("\u{1b}[2mResolving credentials for \(connection.name)…\u{1b}[0m\r\n")
     }
 
-    /// Begins the SSH session with resolved credentials.
+    /// Begins the SSH session with resolved credentials. Ignored once the
+    /// pane has been closed, so a slow prompt can't leave a zombie session.
     func start(username: String, auth: SshAuth) {
+        guard !terminated else { return }
         self.username = username
         self.auth = auth
         connect()
@@ -101,6 +105,8 @@ final class TerminalSessionView: NSView, PaneContent {
     }
 
     func terminate() {
+        terminated = true
+        pendingResize?.cancel()
         bridge?.detach()
         bridge = nil
         session?.close()
@@ -161,14 +167,19 @@ final class TerminalSessionView: NSView, PaneContent {
         feed("\r\n\u{1b}[31m\(message)\u{1b}[0m\r\n")
     }
 
-    func handleClosed() {
+    func handleClosed(clean: Bool) {
         isLive = false
         session = nil
+        guard !terminated else { return }
         if reconnectPending {
             reconnectPending = false
             connect()
+        } else if clean {
+            feed("\r\n\u{1b}[2m[Session ended]\u{1b}[0m\r\n")
+            onSessionEnded?(true)
         } else {
             feed("\r\n\u{1b}[2m[Disconnected]\u{1b}[0m\r\n")
+            onSessionEnded?(false)
         }
     }
 
@@ -286,8 +297,8 @@ final class SessionBridge: SshListener, @unchecked Sendable {
         onMain { [self] in owner?.handleError(message) }
     }
 
-    func onClosed() {
-        onMain { [self] in owner?.handleClosed() }
+    func onClosed(clean: Bool) {
+        onMain { [self] in owner?.handleClosed(clean: clean) }
     }
 
     func confirmHostKey(host: String, port: UInt16, keyType: String, fingerprint: String) -> Bool {

@@ -130,7 +130,7 @@ struct ConnectionEditorView: View {
                     TextField("Port", value: $draft.port, format: .number.grouping(.never))
                     TextField("Username", text: $draft.username,
                               prompt: Text(draft.authMethod == .credential ? "Blank uses the credential's" : ""))
-                    TextField("Folder", text: $draft.folder, prompt: Text("Optional"))
+                    TextField("Folder", text: $draft.folder, prompt: Text("Optional; use / for subfolders"))
                     if draft.kind == .rdp {
                         Text("The desktop follows the pane size. Use DOMAIN\\user or user@domain for domain accounts.")
                             .font(.caption)

@@ -20,6 +20,7 @@ final class RdpSessionView: NSView, PaneContent {
     private var lastRequestedSize: (Int, Int) = (0, 0)
     private var trackingArea: NSTrackingArea?
     private var modifierFlags: NSEvent.ModifierFlags = []
+    private var terminated = false
     private let status = NSTextField(wrappingLabelWithString: "")
 
     // MARK: PaneContent
@@ -34,6 +35,7 @@ final class RdpSessionView: NSView, PaneContent {
     var onTitleChange: ((String) -> Void)?
     var onStateChange: (() -> Void)?
     var onFocus: (() -> Void)?
+    var onSessionEnded: ((Bool) -> Void)?
 
     init(connection: Connection) {
         self.connection = connection
@@ -96,6 +98,7 @@ final class RdpSessionView: NSView, PaneContent {
     // MARK: Lifecycle
 
     func start(username: String, password: String, domain: String?) {
+        guard !terminated else { return }
         self.username = username
         self.password = password
         self.domain = domain
@@ -115,11 +118,14 @@ final class RdpSessionView: NSView, PaneContent {
     }
 
     func terminate() {
+        terminated = true
+        pendingResize?.cancel()
         bridge?.detach()
         bridge = nil
         session?.close()
         session = nil
         isLive = false
+        password = ""
     }
 
     private func connect() {
@@ -233,10 +239,17 @@ final class RdpSessionView: NSView, PaneContent {
         setStatus(message)
     }
 
-    func handleClosed(_ reason: String) {
+    func handleClosed(_ reason: String, clean: Bool) {
         isLive = false
         session = nil
-        setStatus("Disconnected: \(reason)")
+        guard !terminated else { return }
+        if clean {
+            setStatus("Session ended: \(reason)")
+            onSessionEnded?(true)
+        } else {
+            setStatus("Disconnected: \(reason)")
+            onSessionEnded?(false)
+        }
     }
 
     private func allocateSurface(width: Int, height: Int) {
@@ -444,7 +457,7 @@ final class RdpBridge: RdpListener, @unchecked Sendable {
         onMain { [self] in owner?.handleError(message) }
     }
 
-    func onClosed(reason: String) {
-        onMain { [self] in owner?.handleClosed(reason) }
+    func onClosed(reason: String, clean: Bool) {
+        onMain { [self] in owner?.handleClosed(reason, clean: clean) }
     }
 }

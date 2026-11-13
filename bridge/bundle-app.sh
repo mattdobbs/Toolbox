@@ -36,6 +36,7 @@ for dylib in "$BIN_DIR"/*.dylib; do
   codesign --force --sign - "$APP/Contents/Frameworks/$(basename "$dylib")" >/dev/null
 done
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/Toolbox" 2>/dev/null || true
+cp "$ROOT/App/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -48,6 +49,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>Toolbox</string>
   <key>CFBundleDisplayName</key><string>Toolbox</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>CFBundleVersion</key><string>1</string>
