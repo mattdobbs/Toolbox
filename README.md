@@ -104,6 +104,12 @@ to Unlock Vault.
 
 ## Trying it without real hosts
 
+`tools/e2e/` packages the throwaway setup used for end-to-end checks:
+`make-fixture.sh` (keys, known_hosts, fake `op`, store), `servers.sh start`
+(echo SSH+SFTP on 2222, RDP on 3390), `launch.sh --connect echo` and
+`capture.sh` for screenshots. `CLAUDE.md` holds the working notes, machine
+setup and current state for whoever (or whatever) picks the project up.
+
 ```sh
 cd core
 cargo run --example echo_server --features test-support -- --key <openssh-private-key>   # SSH + SFTP on 127.0.0.1:2222, demo / secret
