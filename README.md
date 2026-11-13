@@ -35,6 +35,28 @@ make test      # Rust unit + integration tests (spins up an in-process SSH serve
 Open `App/Toolbox.xcodeproj` in Xcode for day-to-day work on the Swift side.
 Re-run `make core` whenever the Rust API changes.
 
+### Code signing and the Keychain prompt
+
+macOS remembers a Keychain "Always Allow" per code signature. Without a
+signing identity `make app` signs ad hoc, and that signature changes with
+every build, so the "Toolbox wants to use your confidential information"
+dialog for the vault key comes back after each rebuild. Fix it once per Mac:
+
+```sh
+make signing   # creates and trusts a "Toolbox Local Signing" certificate (asks for your password)
+make app       # now signed with it; the next launch asks once, then stays quiet
+```
+
+`make app` prefers, in order: `TOOLBOX_SIGN_IDENTITY`, a Developer ID
+Application identity, an Apple Development identity, Toolbox Local Signing,
+then ad hoc (with a warning). To hand the app to coworkers, sign it with a
+Developer ID and notarize it; a self-signed build makes them right-click →
+Open the first time, and they answer the Keychain dialog once.
+
+The remaining prompt, Touch ID (or the login password) before the vault
+unlocks, is deliberate and can be turned off with Toolbox ▸ Require Touch ID
+to Unlock Vault.
+
 ## What works
 
 - Workspaces as native window tabs, split panes, SSH terminals (SwiftTerm on
@@ -49,7 +71,8 @@ Re-run `make core` whenever the Rust API changes.
 - Workspaces are tabs (the bar stays visible; "+" or ⌘T adds one) and any mix
   of sessions can live in any of them. Move a pane to another workspace from
   its header's context menu or the Pane menu (⌘⇧M for a new workspace); the
-  session keeps running through the move.
+  session keeps running through the move. Double-click a tab (or press ⌘⇧R)
+  to rename the workspace.
 - A sidebar tree like Royal TS: folders you create (nest them with `/`),
   providers as folders in place with what they generate underneath (an
   Active Directory provider shows its OU hierarchy), drag and drop between
@@ -57,7 +80,14 @@ Re-run `make core` whenever the Rust API changes.
   Credentials" lists at the bottom. Expansion is remembered.
 - Credentials: username plus password or SSH key, kept encrypted in a local
   vault (key in the login Keychain, unlocked with Touch ID), fetched from
-  1Password at connect time, or prompted for.
+  1Password at connect time, or prompted for. A connection can pick an
+  existing credential (the picker groups vault, 1Password and ask-each-time
+  entries), carry its own username and password (stored in the vault just
+  for that connection; the username lives under the method, not on the
+  connection), or use its folder's credential: right-click a folder
+  and choose Set Credential… and every connection underneath set to "Use the
+  folder's credential" uses it, nearest folder first. Folders that hand one down show
+  a key badge.
 - Providers (dynamic folders): a 1Password provider turns vault items into
   credentials via the `op` CLI; an Active Directory provider turns computer
   objects into connections (Windows → RDP, macOS → VNC, Linux → SSH, OUs as
@@ -84,8 +114,11 @@ cargo run --example rdp_server --features test-support                          
 Launch overrides for a throwaway setup: `TOOLBOX_STORE_PATH`,
 `TOOLBOX_VAULT_PATH`, `TOOLBOX_KNOWN_HOSTS`, `--connect <id>` to open a
 connection on start, `--files <id>` to open its SFTP browser (both may repeat, each
-opening another pane), `--expand-all` to expand the whole sidebar tree, and `--demo-move` to move the
-focused pane into a new workspace after launch.
+opening another pane), `--expand-all` to expand the whole sidebar tree, `--demo-move` to move the
+focused pane into a new workspace after launch, `--edit-connection <id|new>` and
+`--set-folder-credential <path>` to open those sheets at launch, `--unlock-vault` to unlock the vault at launch and
+log the outcome, `TOOLBOX_KEYCHAIN_SERVICE` to use a separate Keychain item for the vault key, and
+the standard defaults override `-vaultRequiresAuth NO` to skip the Touch ID step for that run.
 
 `make icon` re-renders the app icon from `bridge/make-icon.swift`.
 `docs/SECURITY-REVIEW.md` records the review findings and residual risks.

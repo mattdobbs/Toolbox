@@ -17,6 +17,36 @@ if [[ -d "$XCODE_PLUGINS" ]]; then
   SWIFT_FLAGS+=(-Xswiftc -plugin-path -Xswiftc "$XCODE_PLUGINS")
 fi
 
+# Code signing. The Keychain remembers "Always Allow" per code signature and
+# an ad-hoc signature changes with every build, so prefer a real identity:
+#   TOOLBOX_SIGN_IDENTITY=<name or SHA-1>   explicit choice
+#   otherwise the first of: Developer ID Application, Apple Development,
+#   Toolbox Local Signing (from `make signing`); ad hoc as a last resort.
+pick_identity() {
+  if [[ -n "${TOOLBOX_SIGN_IDENTITY:-}" ]]; then
+    printf '%s\t%s\n' "$TOOLBOX_SIGN_IDENTITY" "$TOOLBOX_SIGN_IDENTITY"
+    return
+  fi
+  local identities pattern line
+  identities="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+  for pattern in "Developer ID Application:" "Apple Development:" "Toolbox Local Signing"; do
+    line="$(printf '%s\n' "$identities" | grep -F "$pattern" | head -1 || true)"
+    if [[ -n "$line" ]]; then
+      # lines look like:  1) <sha1> "<name>"
+      printf '%s\t%s\n' "$(awk '{print $2}' <<<"$line")" "$(sed -E 's/^[^"]*"(.*)"[^"]*$/\1/' <<<"$line")"
+      return
+    fi
+  done
+  printf -- '-\tad-hoc\n'
+}
+IFS=$'\t' read -r SIGN_ID SIGN_NAME < <(pick_identity)
+SIGN_FLAGS=(--force --sign "$SIGN_ID")
+case "$SIGN_NAME" in
+  ad-hoc) ;;
+  *"Developer ID Application"*) SIGN_FLAGS+=(--timestamp --options runtime) ;;  # what notarization needs
+  *) SIGN_FLAGS+=(--timestamp=none) ;;
+esac
+
 cd "$ROOT/App"
 swift build -c "$CONFIG" --product Toolbox "${SWIFT_FLAGS[@]}"
 BIN_DIR="$(swift build -c "$CONFIG" --show-bin-path)"
@@ -33,7 +63,7 @@ done
 for dylib in "$BIN_DIR"/*.dylib; do
   [[ -e "$dylib" ]] || continue
   cp "$dylib" "$APP/Contents/Frameworks/"
-  codesign --force --sign - "$APP/Contents/Frameworks/$(basename "$dylib")" >/dev/null
+  codesign "${SIGN_FLAGS[@]}" "$APP/Contents/Frameworks/$(basename "$dylib")" >/dev/null
 done
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/Toolbox" 2>/dev/null || true
 cp "$ROOT/App/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
@@ -62,5 +92,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign --force --sign - "$APP" >/dev/null
+codesign "${SIGN_FLAGS[@]}" "$APP" >/dev/null
+if [[ "$SIGN_ID" == "-" ]]; then
+  echo "warning: signed ad hoc; the Keychain will ask about the vault key again after every rebuild." >&2
+  echo "         Run 'make signing' once to give the app a stable identity." >&2
+else
+  echo "signed with: $SIGN_NAME"
+fi
 echo "ok: $APP"

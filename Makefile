@@ -4,12 +4,13 @@
 #   make run      build and launch the app
 #   make test     run the Rust core tests
 #   make icon     re-render the app icon (icns + asset catalog)
+#   make signing  one-time: create a local code-signing identity so the Keychain stops re-prompting
 #   make project  regenerate App/Toolbox.xcodeproj from App/project.yml
 #   make xcode    build the Xcode project (needs the Xcode license accepted)
 export PATH := $(HOME)/.cargo/bin:/opt/homebrew/bin:$(PATH)
 XCODE_DEV := /Applications/Xcode.app/Contents/Developer
 
-.PHONY: all core app run test project xcode icon clean
+.PHONY: all core app run test project xcode icon signing clean
 
 all: core app
 
@@ -30,6 +31,9 @@ project:
 
 icon:
 	bridge/make-icon.sh
+
+signing:
+	bridge/signing-identity.sh
 
 xcode: project
 	DEVELOPER_DIR=$(XCODE_DEV) xcodebuild -project App/Toolbox.xcodeproj -scheme Toolbox \

@@ -9,6 +9,8 @@ enum MainMenu {
         appMenu.addItem(withTitle: "About Toolbox", action: #selector(AppDelegate.showAbout(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Lock Vault", action: #selector(AppDelegate.lockVault(_:)), keyEquivalent: "")
+        appMenu.addItem(withTitle: "Require Touch ID to Unlock Vault",
+                        action: #selector(AppDelegate.toggleVaultAuthentication(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide Toolbox", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let hideOthers = appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
@@ -85,7 +87,8 @@ enum MainMenu {
         let window = NSMenu(title: "Window")
         window.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         window.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
-        window.addItem(withTitle: "Rename Workspace…", action: #selector(WorkspaceWindowController.renameWorkspace(_:)), keyEquivalent: "")
+        let rename = window.addItem(withTitle: "Rename Workspace…", action: #selector(WorkspaceWindowController.renameWorkspace(_:)), keyEquivalent: "r")
+        rename.keyEquivalentModifierMask = [.command, .shift]
         window.addItem(.separator())
         window.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
         main.addItem(submenu: window)

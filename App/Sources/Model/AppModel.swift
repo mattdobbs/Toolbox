@@ -11,6 +11,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var providers: [Provider] = []
     /// Folder paths (`ACME/Jump Boxes`), including empty ones.
     @Published private(set) var folders: [String] = []
+    /// Credential id assigned to a folder, by path.
+    @Published private(set) var folderCredentials: [String: String] = [:]
 
     let store: ConnectionStore
     let storeURL: URL
@@ -65,6 +67,7 @@ final class AppModel: ObservableObject {
         credentials = store.listCredentials()
         providers = store.listProviders()
         folders = store.listFolders()
+        folderCredentials = Dictionary(uniqueKeysWithValues: store.listFolderCredentials().map { ($0.folder, $0.credentialId) })
     }
 
     // MARK: Folders
@@ -87,6 +90,23 @@ final class AppModel: ObservableObject {
         reload()
     }
 
+    /// The credential assigned directly to `path`, if any.
+    func folderCredential(_ path: String) -> Credential? {
+        folderCredentials[path].flatMap(credential)
+    }
+
+    /// What a connection in `folder` inherits, and the folder it comes from.
+    func inheritedCredential(forFolder folder: String?) -> (folder: String, credential: Credential)? {
+        guard let found = store.inheritedCredential(folder: folder),
+              let credential = credential(found.credentialId) else { return nil }
+        return (found.folder, credential)
+    }
+
+    func setFolderCredential(_ path: String, _ credentialId: String?) throws {
+        try store.setFolderCredential(folder: path, credentialId: credentialId)
+        reload()
+    }
+
     func moveConnection(_ connection: Connection, to folder: String?) throws {
         try store.moveConnection(id: connection.id, folder: folder)
         reload()
@@ -105,15 +125,46 @@ final class AppModel: ObservableObject {
 
     // MARK: Connections
 
+    /// Saves the record. A connection with its own stored password keeps it
+    /// in the vault under the connection's id; a blank password keeps the
+    /// one already stored.
     @discardableResult
-    func save(_ connection: Connection) throws -> Connection {
-        let stored = try store.upsert(connection: connection)
+    func save(_ connection: Connection, storedPassword: String? = nil) async throws -> Connection {
+        var record = connection
+        let previous = record.id.isEmpty ? nil : connections.first { $0.id == record.id }
+        var wroteSecret = false
+        if case .storedPassword = record.auth {
+            let vault = try await VaultManager.shared.unlockedVault()
+            if record.id.isEmpty { record.id = newId() }
+            let existing = (try? vault.getSecret(id: record.id))?.password
+            guard let password = storedPassword.nonEmpty ?? existing.nonEmpty else {
+                throw ResolveError.missingPassword(record.name)
+            }
+            try vault.setSecret(id: record.id, secret: Secret(password: password, privateKey: nil, passphrase: nil))
+            wroteSecret = true
+        }
+        let stored: Connection
+        do {
+            stored = try store.upsert(connection: record)
+        } catch {
+            if wroteSecret, previous == nil {
+                _ = try? VaultManager.shared.vault.deleteSecret(id: record.id)
+            }
+            throw error
+        }
+        // Switching away from a stored password leaves nothing behind.
+        if let previous, case .storedPassword = previous.auth, !wroteSecret, VaultManager.shared.vault.isUnlocked() {
+            _ = try? VaultManager.shared.vault.deleteSecret(id: stored.id)
+        }
         reload()
         return stored
     }
 
     func delete(_ connection: Connection) throws {
         _ = try store.delete(id: connection.id)
+        if case .storedPassword = connection.auth, VaultManager.shared.vault.isUnlocked() {
+            _ = try? VaultManager.shared.vault.deleteSecret(id: connection.id)
+        }
         reload()
     }
 

@@ -42,7 +42,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
                 syncProvider: { [weak self] in self?.syncProvider($0) },
                 newFolder: { [weak self] in self?.newFolder(in: $0) },
                 renameFolder: { [weak self] in self?.renameFolder($0) },
-                deleteFolder: { [weak self] in self?.deleteFolder($0) }
+                deleteFolder: { [weak self] in self?.deleteFolder($0) },
+                setFolderCredential: { [weak self] in self?.setFolderCredential($0) }
             )
         )
         sidebar.expandAllOnLoad = CommandLine.arguments.contains("--expand-all")
@@ -179,17 +180,23 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     func edit(_ connection: Connection?, inFolder folder: String? = nil) {
         guard editorSheet == nil else { return }
         var draft = connection.map(ConnectionDraft.init) ?? ConnectionDraft()
-        if connection == nil, let folder { draft.folder = folder }
+        if connection == nil, let folder {
+            draft.folder = folder
+            // A folder that hands down a credential is the natural default.
+            if AppModel.shared.inheritedCredential(forFolder: folder) != nil { draft.authMethod = .folder }
+        }
         let editor = ConnectionEditorView(
             model: AppModel.shared,
             draft: draft,
-            onSave: { [weak self] result in
+            onSave: { [weak self] result, password in
                 guard let self else { return }
-                do {
-                    try AppModel.shared.save(result)
-                    self.endEditor()
-                } catch {
-                    Prompts.error(title: "Couldn't save the connection", message: describe(error))
+                Task { @MainActor in
+                    do {
+                        try await AppModel.shared.save(result, storedPassword: password)
+                        self.endEditor()
+                    } catch {
+                        Prompts.error(title: "Couldn't save the connection", message: describe(error))
+                    }
                 }
             },
             onCancel: { [weak self] in self?.endEditor() }
@@ -222,10 +229,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
 
     func deleteCredential(_ credential: Credential) {
         let users = AppModel.shared.store.connectionsUsingCredential(id: credential.id)
+        let folders = AppModel.shared.store.foldersUsingCredential(id: credential.id)
         var message = "The credential is removed from Toolbox."
         if case .vault = credential.kind { message = "The stored secret is deleted from the vault." }
         if !users.isEmpty {
             message += " \(users.count) connection\(users.count == 1 ? "" : "s") still reference it and will ask for a password instead."
+        }
+        if !folders.isEmpty {
+            message += " \(folders.count) folder\(folders.count == 1 ? " passes" : "s pass") it down to connections; they lose it."
         }
         guard Prompts.confirm(title: "Delete “\(credential.name)”?", message: message, ok: "Delete") else { return }
         do {
@@ -310,6 +321,26 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         } catch {
             Prompts.error(title: "Couldn't delete the folder", message: describe(error))
         }
+    }
+
+    func setFolderCredential(_ path: String) {
+        guard editorSheet == nil else { return }
+        let editor = FolderCredentialView(
+            model: AppModel.shared,
+            folder: path,
+            selection: AppModel.shared.folderCredentials[path],
+            onSave: { [weak self] id in
+                guard let self else { return }
+                do {
+                    try AppModel.shared.setFolderCredential(path, id)
+                    self.endEditor()
+                } catch {
+                    Prompts.error(title: "Couldn't set the folder credential", message: describe(error))
+                }
+            },
+            onCancel: { [weak self] in self?.endEditor() }
+        )
+        presentSheet(editor)
     }
 
     private func endEditor() {
@@ -401,11 +432,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         paneVC.closePane(pane.id)
     }
 
+    /// Also reached by double-clicking the workspace's tab.
     @objc func renameWorkspace(_ sender: Any?) {
         guard let window else { return }
-        if let name = Prompts.askText(title: "Rename Workspace", message: "", initial: window.title, ok: "Rename"),
+        if let name = Prompts.askText(title: "Rename Workspace", message: "Double-click a tab to rename it any time.",
+                                      initial: window.title, ok: "Rename"),
            !name.trimmingCharacters(in: .whitespaces).isEmpty {
-            window.title = name
+            window.title = name.trimmingCharacters(in: .whitespaces)
         }
     }
 

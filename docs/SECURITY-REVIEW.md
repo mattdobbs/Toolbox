@@ -92,3 +92,71 @@ Verification: 33 core tests, clippy clean, `cargo audit` unchanged from the
 morning (one advisory on the pinned `rsa` release candidate, four
 unmaintained transitive crates), end-to-end runs for the three-pane layout,
 the workspace move and the automatic close.
+
+## Addendum — 2026-11-13, evening: Keychain prompts and code signing
+
+The owner reported a second password dialog ("Toolbox wants to use your
+confidential information stored in 'Toolbox vault key'") that came back even
+after Always Allow. Cause: the SwiftPM bundle was signed ad hoc, so its
+designated requirement was `cdhash H"…"`, which changes with every build, and
+the Keychain stores Always Allow against exactly that requirement.
+
+- **Stable signature.** `make app` now signs with a certificate when one
+  exists (`TOOLBOX_SIGN_IDENTITY`, Developer ID Application, Apple
+  Development, or the "Toolbox Local Signing" identity that `make signing`
+  creates) and warns when it falls back to ad hoc. A certificate-based
+  requirement (`identifier "com.dobbs.Toolbox" and certificate leaf = H"…"`)
+  does not change between builds.
+- **The local identity** is a self-signed certificate in the login keychain,
+  trusted for code signing by the user in the one-time `make signing` step
+  (macOS asks for the login password). It proves nothing to other Macs;
+  Gatekeeper still treats the app as unidentified. It only gives the Keychain
+  a stable name for the app. Distribution should use Developer ID plus
+  notarization, which the script path already supports (hardened runtime
+  and timestamp are added for Developer ID identities).
+- **Re-owning the key.** When the signing certificate changes, VaultManager
+  rewrites the vault-key item so the running build is its creator (staged
+  copy, delete old, rename), so a single "Allow" is enough and the key is
+  present in at least one item at every step. Ad-hoc builds skip this; they
+  have nothing stable to bind to.
+- **Rejected alternative.** An identifier-only designated requirement would
+  have kept the prompt away for ad-hoc builds too, but any app claiming the
+  bundle id could then read the key once the user had allowed it once.
+- **Testing aids** added: `TOOLBOX_KEYCHAIN_SERVICE` (separate Keychain
+  item, labelled with the service name), `--unlock-vault` (unlock at launch
+  and log the outcome) and the standard `-vaultRequiresAuth NO` defaults
+  override. They only affect the user's own process; the Touch ID gate is a
+  user preference (menu toggle, UserDefaults) the user can change anyway.
+- **Denied access** now reads "Access to the vault key in the Keychain was
+  denied" instead of a raw status.
+
+Verification: the ad-hoc build creates its own test item
+(`TOOLBOX_KEYCHAIN_SERVICE`) and re-reads it on two further launches of the
+same build without any SecurityAgent dialog ("vault unlocked" logged each
+time). The certificate-signed path could not be exercised in this session
+because `make signing` needs the user's login password for the trust step;
+the first signed build will ask once for the existing item and must stay
+quiet across rebuilds after that.
+
+## Addendum — 2026-11-13, night: connection credentials and folder inheritance
+
+- **Stored passwords.** A connection set to "Username and password" keeps the
+  password in the vault under the connection's own id (same XChaCha20-Poly1305
+  vault, same Touch ID gate); the store document still never holds a secret.
+  Deleting the connection, or switching it to another method, removes the
+  secret when the vault is unlocked; a locked vault leaves an orphaned entry
+  that nothing references, as with deleted vault credentials.
+- **Folder credentials** are a path → credential-id map in the store. The
+  core validates the credential exists when assigning, drops assignments when
+  the credential or folder is deleted, and carries them through renames.
+  Resolution walks up from the connection's folder and ignores assignments
+  whose credential no longer exists, so a stale mapping cannot resolve to
+  the wrong account. Generated (AD) connections keep their explicit
+  credentials; inheritance only applies to connections that opt in.
+- **Testing aids** `--edit-connection` and `--set-folder-credential` open
+  sheets in the user's own process and touch nothing else.
+- Core tests: 35 pass (two new: folder inheritance across renames, deletes
+  and reopen; auth-kind JSON round trip). End-to-end: a connection in a
+  folder with a prompt-type credential asked for that credential's username;
+  a stored-password connection with nothing in the vault reported it instead
+  of connecting.

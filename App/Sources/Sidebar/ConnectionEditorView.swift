@@ -2,21 +2,31 @@ import AppKit
 import SwiftUI
 
 enum AuthMethod: String, CaseIterable, Identifiable {
-    case credential, agent, keyFile, password
+    case credential, stored, folder, agent, keyFile, password
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
-        case .credential: return "Credential"
-        case .agent: return "SSH agent"
-        case .keyFile: return "Private key file"
-        case .password: return "Ask for a password"
+        case .credential: return "Use an existing credential"
+        case .stored: return "Specify username and password"
+        case .folder: return "Use the folder's credential"
+        case .agent: return "Use the SSH agent"
+        case .keyFile: return "Use a private key file"
+        case .password: return "Ask for a password every time"
         }
     }
 
     static func available(for kind: ConnectionKind) -> [AuthMethod] {
-        kind == .ssh ? allCases : [.credential, .password]
+        kind == .ssh ? allCases : [.credential, .stored, .folder, .password]
+    }
+
+    /// Credential-based methods bring their own username; the rest need one.
+    var needsUsername: Bool {
+        switch self {
+        case .credential, .folder: return false
+        case .stored, .agent, .keyFile, .password: return true
+        }
     }
 }
 
@@ -31,6 +41,8 @@ struct ConnectionDraft {
     var folder = ""
     var authMethod: AuthMethod = .agent
     var credentialId: String?
+    /// Password typed for "Username and password"; blank keeps the stored one.
+    var password = ""
     var keyPath = ""
     var agentSocket = ""
     var tags: [String] = []
@@ -62,6 +74,10 @@ struct ConnectionDraft {
         case .credential(let credentialId):
             authMethod = .credential
             self.credentialId = credentialId
+        case .storedPassword:
+            authMethod = .stored
+        case .folderCredential:
+            authMethod = .folder
         }
     }
 
@@ -69,13 +85,16 @@ struct ConnectionDraft {
         if name.trimmingCharacters(in: .whitespaces).isEmpty { return "Give the connection a name." }
         if host.trimmingCharacters(in: .whitespaces).isEmpty { return "Host is required." }
         if !(1...65535).contains(port) { return "Port must be between 1 and 65535." }
+        if authMethod.needsUsername, username.trimmingCharacters(in: .whitespaces).isEmpty {
+            return "Username is required."
+        }
         switch authMethod {
         case .credential where credentialId == nil:
             return "Choose a credential."
+        case .stored where id.isEmpty && password.isEmpty:
+            return "Enter a password."
         case .keyFile where keyPath.trimmingCharacters(in: .whitespaces).isEmpty:
             return "Choose a private key file."
-        case .agent, .keyFile, .password:
-            if username.trimmingCharacters(in: .whitespaces).isEmpty { return "Username is required." }
         default:
             break
         }
@@ -93,6 +112,10 @@ struct ConnectionDraft {
             auth = .agent(socketPath: blankToNil(agentSocket))
         case .credential:
             auth = .credential(credentialId: credentialId ?? "")
+        case .stored:
+            auth = .storedPassword
+        case .folder:
+            auth = .folderCredential
         }
         return Connection(
             id: id,
@@ -100,19 +123,56 @@ struct ConnectionDraft {
             kind: kind,
             host: host.trimmingCharacters(in: .whitespaces),
             port: UInt16(clamping: port),
-            username: username.trimmingCharacters(in: .whitespaces),
+            // Credential-based methods take the credential's username.
+            username: authMethod.needsUsername ? username.trimmingCharacters(in: .whitespaces) : "",
             auth: auth,
             folder: blankToNil(folder),
             tags: tags,
             source: source
         )
     }
+
+    /// The password to store for "Username and password", if one was typed.
+    func storedPassword() -> String? {
+        authMethod == .stored ? blankToNil(password) : nil
+    }
+}
+
+/// Picker over the credentials, grouped by where their secret lives.
+struct CredentialPicker: View {
+    let title: String
+    let credentials: [Credential]
+    @Binding var selection: String?
+    var noneLabel = "Choose…"
+
+    var body: some View {
+        Picker(title, selection: $selection) {
+            Text(noneLabel).tag(String?.none)
+            section("Vault") { if case .vault = $0.kind { return true }; return false }
+            section("1Password") { if case .onePassword = $0.kind { return true }; return false }
+            section("Ask each time") { if case .prompt = $0.kind { return true }; return false }
+        }
+    }
+
+    @ViewBuilder
+    private func section(_ name: String, _ belongs: (Credential) -> Bool) -> some View {
+        let items = credentials.filter(belongs)
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        if !items.isEmpty {
+            Section(name) {
+                ForEach(items) { credential in
+                    Text(credential.username.isEmpty ? credential.name : "\(credential.name) (\(credential.username))")
+                        .tag(Optional(credential.id))
+                }
+            }
+        }
+    }
 }
 
 struct ConnectionEditorView: View {
     @ObservedObject var model: AppModel
     @State var draft: ConnectionDraft
-    let onSave: (Connection) -> Void
+    let onSave: (Connection, String?) -> Void
     let onCancel: () -> Void
 
     @State private var validation: String?
@@ -128,11 +188,9 @@ struct ConnectionEditorView: View {
                     TextField("Name", text: $draft.name, prompt: Text("nutanix1"))
                     TextField("Host", text: $draft.host, prompt: Text("hostname or IP"))
                     TextField("Port", value: $draft.port, format: .number.grouping(.never))
-                    TextField("Username", text: $draft.username,
-                              prompt: Text(draft.authMethod == .credential ? "Blank uses the credential's" : ""))
                     TextField("Folder", text: $draft.folder, prompt: Text("Optional; use / for subfolders"))
                     if draft.kind == .rdp {
-                        Text("The desktop follows the pane size. Use DOMAIN\\user or user@domain for domain accounts.")
+                        Text("The desktop follows the pane size.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -143,19 +201,37 @@ struct ConnectionEditorView: View {
                             Text(method.label).tag(method)
                         }
                     }
+                    if draft.authMethod.needsUsername {
+                        TextField("Username", text: $draft.username,
+                                  prompt: Text(draft.kind == .rdp ? "DOMAIN\\user or user@domain" : "user"))
+                    }
                     switch draft.authMethod {
                     case .credential:
-                        Picker("Credential", selection: $draft.credentialId) {
-                            Text("Choose…").tag(String?.none)
-                            ForEach(model.credentials) { credential in
-                                Text(credential.username.isEmpty ? credential.name : "\(credential.name) (\(credential.username))")
-                                    .tag(Optional(credential.id))
-                            }
-                        }
+                        CredentialPicker(title: "Credential", credentials: model.credentials, selection: $draft.credentialId)
+                        Text("The credential supplies the username and the secret.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                         if model.credentials.isEmpty {
-                            Text("No credentials yet. Add one under the key tab in the sidebar.")
+                            Text("No credentials yet. Add one with File ▸ New Credential.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                        }
+                    case .stored:
+                        SecureField("Password", text: $draft.password)
+                        Text(draft.id.isEmpty
+                             ? "Kept encrypted in the vault, just for this connection."
+                             : "Leave blank to keep the stored password.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    case .folder:
+                        if let inherited = model.inheritedCredential(forFolder: blankToNil(draft.folder)) {
+                            Text("Uses “\(inherited.credential.name)” from folder “\(inherited.folder)”. A credential on a nearer folder takes over automatically.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("No folder above this connection has a credential yet. Right-click a folder in the sidebar and choose Set Credential…, then pick this method.")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
                         }
                     case .password:
                         Text("You'll be asked for the password every time.")
@@ -214,7 +290,7 @@ struct ConnectionEditorView: View {
             validation = problem
             return
         }
-        onSave(draft.connection())
+        onSave(draft.connection(), draft.storedPassword())
     }
 
     private func chooseKey() {

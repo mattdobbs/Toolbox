@@ -3,12 +3,22 @@ import AppKit
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, NSMenuDelegate {
     private var controllers: [WorkspaceWindowController] = []
+    private var tabClickMonitor: Any?
 
     var workspaces: [WorkspaceWindowController] { controllers }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         MainMenu.install()
         _ = AppModel.shared
+        // Double-clicking a workspace tab renames it. The first click of the
+        // pair has already selected the tab, so the key window is the one.
+        tabClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
+            guard event.clickCount == 2, Self.isOnWorkspaceTab(event) else { return event }
+            DispatchQueue.main.async {
+                (NSApp.keyWindow?.windowController as? WorkspaceWindowController)?.renameWorkspace(nil)
+            }
+            return nil
+        }
         let controller = newWorkspaceWindow(asTab: false)
         NSApp.activate(ignoringOtherApps: true)
         Task { @MainActor in
@@ -19,6 +29,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         }
     }
 
+    /// Whether a click landed on the window's tab bar. The bar is private
+    /// AppKit (NSTabBar draws the tabs itself; the "+" is an
+    /// NSTabBarNewTabButton inside it), so this goes by class name.
+    private static func isOnWorkspaceTab(_ event: NSEvent) -> Bool {
+        guard let window = event.window, window.windowController is WorkspaceWindowController,
+              let frameView = window.contentView?.superview else { return false }
+        var view = frameView.hitTest(event.locationInWindow)
+        var onTabBar = false
+        while let current = view {
+            let name = String(describing: type(of: current))
+            if name.contains("NewTab") { return false }
+            if name.contains("TabBar") { onTabBar = true }
+            view = current.superview
+        }
+        return onTabBar
+    }
+
     @objc func syncProviders(_ sender: Any?) {
         Task { @MainActor in
             await ProviderSync.shared.syncAll(automatic: false)
@@ -27,6 +54,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
     @objc func lockVault(_ sender: Any?) {
         VaultManager.shared.lock()
+    }
+
+    @objc func toggleVaultAuthentication(_ sender: Any?) {
+        VaultManager.shared.requiresAuthentication.toggle()
     }
 
     /// `Toolbox --connect <name or id>` opens that connection on launch;
@@ -51,6 +82,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         // Testing aid: move the focused pane into a fresh workspace tab.
         if args.contains("--demo-move") {
             controller.movePaneToNewWorkspace(nil)
+        }
+        // Testing aids: open an editor sheet straight away.
+        if let index = args.firstIndex(of: "--edit-connection"), index + 1 < args.count {
+            let wanted = args[index + 1]
+            controller.edit(wanted == "new" ? nil : AppModel.shared.connections.first { $0.id == wanted || $0.name == wanted })
+        }
+        if let index = args.firstIndex(of: "--set-folder-credential"), index + 1 < args.count {
+            controller.setFolderCredential(args[index + 1])
+        }
+        // Testing aid: unlock the vault right away and log how it went.
+        if args.contains("--unlock-vault") {
+            Task { @MainActor in
+                do {
+                    _ = try await VaultManager.shared.unlockedVault()
+                    NSLog("vault unlocked")
+                } catch {
+                    NSLog("vault unlock failed: \(error.localizedDescription)")
+                }
+            }
         }
     }
 
@@ -156,6 +206,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         if menuItem.action == #selector(selectTheme(_:)) {
             let id = menuItem.representedObject as? String
             menuItem.state = id == ThemeStore.shared.current.id ? .on : .off
+        }
+        if menuItem.action == #selector(toggleVaultAuthentication(_:)) {
+            menuItem.state = VaultManager.shared.requiresAuthentication ? .on : .off
         }
         return true
     }

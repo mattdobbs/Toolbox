@@ -3,6 +3,7 @@
 //! The store is a single JSON document. Secrets never live here: they are in
 //! the vault, in 1Password, or prompted for.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -44,6 +45,11 @@ pub enum AuthKind {
     Agent { socket_path: Option<String> },
     /// A credential object: vault entry, 1Password item or prompt.
     Credential { credential_id: String },
+    /// Username on the connection, password kept in the vault under the
+    /// connection's own id.
+    StoredPassword,
+    /// The credential assigned to the nearest folder above the connection.
+    FolderCredential,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
@@ -159,6 +165,14 @@ pub struct SyncResult {
     pub warnings: Vec<String>,
 }
 
+/// A credential assigned to a folder. Connections underneath that use
+/// `AuthKind::FolderCredential` pick it up, nearest folder first.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FolderCredential {
+    pub folder: String,
+    pub credential_id: String,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Document {
     version: u32,
@@ -172,6 +186,9 @@ struct Document {
     /// Slash-separated, e.g. `ACME/Jump Boxes`.
     #[serde(default)]
     folders: Vec<String>,
+    /// Credential assigned to a folder, by path.
+    #[serde(default)]
+    folder_credentials: BTreeMap<String, String>,
 }
 
 #[derive(uniffi::Object)]
@@ -293,7 +310,9 @@ impl ConnectionStore {
         let before = doc.credentials.len();
         doc.credentials.retain(|c| c.id != id);
         let removed = doc.credentials.len() != before;
-        if removed {
+        let assigned = doc.folder_credentials.len();
+        doc.folder_credentials.retain(|_, c| *c != id);
+        if removed || doc.folder_credentials.len() != assigned {
             write_document(&self.path, &doc)?;
         }
         Ok(removed)
@@ -433,6 +452,13 @@ impl ConnectionStore {
                 p.folder = renamed;
             }
         }
+        let moved: Vec<(String, String)> = doc
+            .folder_credentials
+            .iter()
+            .filter_map(|(path, id)| replace_prefix(path, &from, &to).map(|renamed| (renamed, id.clone())))
+            .collect();
+        doc.folder_credentials.retain(|path, _| replace_prefix(path, &from, &to).is_none());
+        doc.folder_credentials.extend(moved);
         if let Some(parent) = parent_path(&to) {
             register_folder(&mut doc, &parent);
         }
@@ -455,8 +481,67 @@ impl ConnectionStore {
             return Err(CoreError::Invalid(format!("“{path}” is not empty; move or delete its contents first")));
         }
         doc.folders.retain(|f| !inside(Some(f)));
+        doc.folder_credentials.retain(|f, _| !inside(Some(f)));
         write_document(&self.path, &doc)?;
         Ok(())
+    }
+
+    // ----- folder credentials -----
+
+    /// Every folder with a credential assigned, sorted by path.
+    pub fn list_folder_credentials(&self) -> Vec<FolderCredential> {
+        lock_or_recover(&self.doc)
+            .folder_credentials
+            .iter()
+            .map(|(folder, credential_id)| FolderCredential {
+                folder: folder.clone(),
+                credential_id: credential_id.clone(),
+            })
+            .collect()
+    }
+
+    /// Assigns a credential to a folder, or clears it with `None`.
+    pub fn set_folder_credential(&self, folder: String, credential_id: Option<String>) -> Result<(), CoreError> {
+        let folder = normalize_folder(&folder).ok_or_else(|| CoreError::Invalid("folder is required".into()))?;
+        let mut doc = lock_or_recover(&self.doc);
+        match credential_id {
+            Some(id) => {
+                if !doc.credentials.iter().any(|c| c.id == id) {
+                    return Err(CoreError::Invalid("no such credential".into()));
+                }
+                doc.folder_credentials.insert(folder, id);
+            }
+            None => {
+                doc.folder_credentials.remove(&folder);
+            }
+        }
+        write_document(&self.path, &doc)
+    }
+
+    /// What a connection in `folder` inherits: the nearest folder at or above
+    /// it with a credential assigned that still exists.
+    pub fn inherited_credential(&self, folder: Option<String>) -> Option<FolderCredential> {
+        let doc = lock_or_recover(&self.doc);
+        let mut current = folder.as_deref().and_then(normalize_folder);
+        while let Some(path) = current {
+            if let Some(id) = doc.folder_credentials.get(&path) {
+                if doc.credentials.iter().any(|c| &c.id == id) {
+                    return Some(FolderCredential { folder: path, credential_id: id.clone() });
+                }
+            }
+            current = parent_path(&path);
+        }
+        None
+    }
+
+    /// Folders a credential is assigned to, for warnings before deleting it.
+    pub fn folders_using_credential(&self, id: String) -> Vec<String> {
+        lock_or_recover(&self.doc)
+            .folder_credentials
+            .iter()
+            .filter(|(_, c)| **c == id)
+            .map(|(f, _)| f.clone())
+            .collect()
     }
 
     /// Moves a connection into a folder (`None` for the top level).
@@ -714,6 +799,7 @@ fn write_document(path: &Path, doc: &Document) -> Result<(), CoreError> {
         credentials: doc.credentials.clone(),
         providers: doc.providers.clone(),
         folders: doc.folders.clone(),
+        folder_credentials: doc.folder_credentials.clone(),
     };
     let text = serde_json::to_string_pretty(&out)?;
     // Write to a sibling temp file then rename so a crash never truncates.
@@ -1012,6 +1098,79 @@ esac
         assert!(matches!(store.delete_folder("Archive".into()), Err(CoreError::Invalid(_))));
         store.delete_folder("Work/Jump Boxes".into()).unwrap();
         assert_eq!(store.list_folders(), vec!["Archive", "Work"]);
+    }
+
+    fn sample_credential(id: &str) -> Credential {
+        Credential {
+            id: id.into(),
+            name: format!("cred {id}"),
+            username: "admin".into(),
+            kind: CredentialKind::Prompt,
+            folder: None,
+            has_private_key: false,
+            tags: vec![],
+            source: None,
+        }
+    }
+
+    #[test]
+    fn folder_credentials_inherit_from_the_nearest_folder() {
+        let (_dir, store) = open_temp();
+        store.upsert_credential(sample_credential("admin")).unwrap();
+        store.upsert_credential(sample_credential("user")).unwrap();
+        assert!(matches!(
+            store.set_folder_credential("ACME".into(), Some("missing".into())),
+            Err(CoreError::Invalid(_))
+        ));
+        store.set_folder_credential("ACME".into(), Some("admin".into())).unwrap();
+        store.set_folder_credential("ACME/Jump Boxes".into(), Some("user".into())).unwrap();
+
+        let nearest = |folder: &str| {
+            store
+                .inherited_credential(Some(folder.into()))
+                .map(|f| (f.folder, f.credential_id))
+        };
+        assert_eq!(nearest("ACME/Jump Boxes/Deep"), Some(("ACME/Jump Boxes".into(), "user".into())));
+        assert_eq!(nearest("ACME/Other"), Some(("ACME".into(), "admin".into())));
+        assert_eq!(nearest("Elsewhere"), None);
+        assert_eq!(store.inherited_credential(None), None);
+        assert_eq!(store.folders_using_credential("admin".into()), vec!["ACME"]);
+
+        // Renames carry the assignment; deleting the credential clears it.
+        store.rename_folder("ACME".into(), "Work".into()).unwrap();
+        assert_eq!(nearest("Work/Jump Boxes/Deep"), Some(("Work/Jump Boxes".into(), "user".into())));
+        store.delete_credential("user".into()).unwrap();
+        assert_eq!(nearest("Work/Jump Boxes/Deep"), Some(("Work".into(), "admin".into())));
+        assert_eq!(store.list_folder_credentials().len(), 1);
+
+        // Clearing and deleting the folder both drop the assignment.
+        store.set_folder_credential("Work".into(), None).unwrap();
+        assert_eq!(nearest("Work/Anything"), None);
+        store.set_folder_credential("Work/Jump Boxes".into(), Some("admin".into())).unwrap();
+        store.delete_folder("Work/Jump Boxes".into()).unwrap();
+        assert!(store.list_folder_credentials().is_empty());
+
+        // Survives a reopen.
+        store.set_folder_credential("Work".into(), Some("admin".into())).unwrap();
+        let reopened = ConnectionStore::open(store.path.to_string_lossy().into()).unwrap();
+        assert_eq!(
+            reopened.inherited_credential(Some("Work/X".into())).map(|f| f.credential_id),
+            Some("admin".into())
+        );
+    }
+
+    #[test]
+    fn auth_kinds_round_trip_through_json() {
+        for auth in [AuthKind::StoredPassword, AuthKind::FolderCredential, AuthKind::Password] {
+            let text = serde_json::to_string(&auth).unwrap();
+            assert_eq!(serde_json::from_str::<AuthKind>(&text).unwrap(), auth);
+        }
+        let (_dir, store) = open_temp();
+        let mut c = sample("stored");
+        c.auth = AuthKind::StoredPassword;
+        let c = store.upsert(c).unwrap();
+        let reopened = ConnectionStore::open(store.path.to_string_lossy().into()).unwrap();
+        assert_eq!(reopened.get(c.id).unwrap().auth, AuthKind::StoredPassword);
     }
 
     #[tokio::test]

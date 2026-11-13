@@ -20,6 +20,7 @@ struct SidebarActions {
     var newFolder: (String?) -> Void
     var renameFolder: (String) -> Void
     var deleteFolder: (String) -> Void
+    var setFolderCredential: (String) -> Void
 }
 
 /// One row of the tree. Nodes are cached by id across rebuilds so the
@@ -126,6 +127,8 @@ final class SidebarCell: NSTableCellView {
     private let title = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
     private let spinner = NSProgressIndicator()
+    /// Shown on folders that pass a credential down.
+    private let badge = NSImageView()
     private var detailHeight: NSLayoutConstraint!
 
     override init(frame frameRect: NSRect) {
@@ -144,10 +147,15 @@ final class SidebarCell: NSTableCellView {
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
+        badge.translatesAutoresizingMaskIntoConstraints = false
+        badge.image = NSImage(systemSymbolName: "key.fill", accessibilityDescription: "Has a credential")
+        badge.contentTintColor = .secondaryLabelColor
+        badge.isHidden = true
         addSubview(icon)
         addSubview(title)
         addSubview(detail)
         addSubview(spinner)
+        addSubview(badge)
         imageView = icon
         textField = title
         detailHeight = detail.heightAnchor.constraint(equalToConstant: 0)
@@ -157,7 +165,11 @@ final class SidebarCell: NSTableCellView {
             icon.widthAnchor.constraint(equalToConstant: 18),
             icon.heightAnchor.constraint(equalToConstant: 18),
             title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
-            title.trailingAnchor.constraint(lessThanOrEqualTo: spinner.leadingAnchor, constant: -4),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: badge.leadingAnchor, constant: -4),
+            badge.trailingAnchor.constraint(equalTo: spinner.leadingAnchor, constant: -2),
+            badge.centerYAnchor.constraint(equalTo: centerYAnchor),
+            badge.widthAnchor.constraint(equalToConstant: 12),
+            badge.heightAnchor.constraint(equalToConstant: 12),
             detail.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             detail.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
             detail.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 0),
@@ -174,8 +186,10 @@ final class SidebarCell: NSTableCellView {
     private var centerTitle: NSLayoutConstraint?
     private var topTitle: NSLayoutConstraint?
 
-    func configure(_ node: SidebarNode, syncing: Bool) {
+    func configure(_ node: SidebarNode, syncing: Bool, credentialName: String? = nil) {
         title.stringValue = node.title
+        badge.isHidden = credentialName == nil
+        toolTip = credentialName.map { "Credential: \($0)" }
         var detailText = ""
         var image: NSImage?
         var tinted = false
@@ -579,7 +593,8 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         let cell = outlineView.makeView(withIdentifier: SidebarCell.identifier, owner: self) as? SidebarCell ?? SidebarCell()
         var syncing = false
         if case .provider(let provider) = node.kind { syncing = sync.inProgress.contains(provider.id) }
-        cell.configure(node, syncing: syncing)
+        let credentialName = node.ownFolder.flatMap(model.folderCredential)?.name
+        cell.configure(node, syncing: syncing, credentialName: credentialName)
         return cell
     }
 
@@ -647,10 +662,16 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
             addItems(to: menu, folder: path)
             menu.addItem(.separator())
             menu.addItem(item("Rename…") { [self] in actions.renameFolder(path) })
+            menu.addItem(item(model.folderCredentials[path] == nil ? "Set Credential…" : "Change Credential…") {
+                [self] in actions.setFolderCredential(path)
+            })
             menu.addItem(item("Delete Folder") { [self] in actions.deleteFolder(path) })
         case .provider(let provider):
             menu.addItem(item("Sync Now") { [self] in actions.syncProvider(provider) })
             menu.addItem(item("Edit…") { [self] in actions.editProvider(provider, nil) })
+            menu.addItem(item(model.folderCredentials[provider.folder] == nil ? "Set Credential…" : "Change Credential…") {
+                [self] in actions.setFolderCredential(provider.folder)
+            })
             menu.addItem(.separator())
             menu.addItem(item("Delete") { [self] in actions.deleteProvider(provider) })
         case .connection(let connection):
