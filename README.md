@@ -8,44 +8,92 @@ right). Swift for the app, Rust for the connection engine.
 ## Layout
 
 ```
-core/     Rust workspace. toolbox-core holds SSH (russh), the connection store,
-          and later RDP (IronRDP), the vault and the 1Password / AD providers.
-bridge/   UniFFI build: compiles the core, generates Swift bindings, and packs
-          the static library into App/Frameworks/ToolboxCoreFFI.xcframework.
-App/      Xcode project (generated from project.yml by XcodeGen). AppKit shell,
-          SwiftUI for forms, SwiftTerm for terminals.
+core/     Rust crate toolbox-core: SSH (russh), SFTP, RDP (IronRDP), the vault,
+          1Password and Active Directory providers, the connection store.
+          Exposed to Swift through UniFFI.
+bridge/   Build scripts: compile the core and generate Swift bindings
+          (build-core.sh), bundle the app (bundle-app.sh), local code-signing
+          identity (signing-identity.sh), icon rendering.
+App/      SwiftPM package (and an optional XcodeGen project.yml). AppKit
+          shell, SwiftUI for forms, SwiftTerm for terminals, RoyalVNCKit for VNC.
+tools/e2e Throwaway fixture, local test servers and screenshot helpers.
+docs/     Security review and Royal TS reference material.
 ```
 
-## Prerequisites
+## Dependencies
 
-- Xcode 16 or newer
-- Rust via rustup (`curl https://sh.rustup.rs -sSf | sh`)
-- XcodeGen (`brew install xcodegen`)
+Required on every Mac that builds the app:
 
-## Build
+| What | Version known to work | Install |
+|---|---|---|
+| macOS on Apple silicon | 14 or newer (built on 26.7) | |
+| Xcode | 16 or newer (built with 27.2) | App Store; open it once so it finishes installing components |
+| Command Line Tools | matching Xcode | `xcode-select --install` |
+| Rust (rustup, stable) | 1.100 | `curl https://sh.rustup.rs -sSf \| sh` |
+| git | any recent | ships with the Command Line Tools |
+
+The Xcode license does not need to be accepted for `make app`: the build
+uses the Command Line Tools' Swift and borrows only Xcode's SwiftUI macro
+plugin, from `/Applications/Xcode.app`. Keep Xcode at that path.
+
+Fetched automatically on first build (network needed once):
+
+- Rust crates from crates.io, plus IronRDP from GitHub pinned to one
+  revision in `core/toolbox-core/Cargo.toml`.
+- Swift packages: SwiftTerm 1.99.3 and RoyalVNCKit (pinned revision), from
+  `App/Package.swift` and `App/Package.resolved`.
+
+Optional:
+
+| What | For | Install |
+|---|---|---|
+| 1Password CLI (`op`) | 1Password providers and credentials | `brew install 1password-cli`, then enable CLI integration in the 1Password app |
+| XcodeGen | `make project` / `make xcode` (also needs `sudo xcodebuild -license accept`) | `brew install xcodegen` |
+| cargo-audit | dependency advisories | `cargo install cargo-audit` |
+| GitHub CLI | pull requests and releases | `brew install gh` |
+
+## Build on a fresh Mac
+
+```sh
+git clone https://github.com/mattdobbs/Toolbox.git && cd Toolbox
+make core      # first run downloads and compiles the Rust crates (several minutes)
+make app       # first run resolves the Swift packages; produces build/Toolbox.app
+make signing   # once per Mac; asks for your login password (see below)
+make app       # rebuild so the bundle carries the stable signature
+make run       # or: open build/Toolbox.app
+make test      # Rust unit and integration tests
+```
+
+On a Mac that already has a clone: `git pull`, then `make core && make app`.
+Always re-run `make core` after pulling, since the Swift bindings and the
+static library are generated from the Rust code and are not in git.
+
+Your connections, credentials and vault live in
+`~/Library/Application Support/Toolbox/` on each Mac and are not synced by
+git. The vault key is in that Mac's login Keychain.
+
+## Build targets
 
 ```sh
 make core      # Rust core → Swift bindings + static library (release)
 make app       # SwiftPM build wrapped into build/Toolbox.app (no Xcode license needed)
+make run       # build and launch
+make test      # Rust unit + integration tests (in-process SSH, SFTP and RDP servers)
+make signing   # one-time local code-signing identity
+make icon      # re-render the app icon
 make project   # App/project.yml → App/Toolbox.xcodeproj (XcodeGen)
 make xcode     # build with xcodebuild (after sudo xcodebuild -license accept)
-make test      # Rust unit + integration tests (spins up an in-process SSH server)
+make clean     # remove all build output
 ```
-
-Open `App/Toolbox.xcodeproj` in Xcode for day-to-day work on the Swift side.
-Re-run `make core` whenever the Rust API changes.
 
 ### Code signing and the Keychain prompt
 
 macOS remembers a Keychain "Always Allow" per code signature. Without a
 signing identity `make app` signs ad hoc, and that signature changes with
 every build, so the "Toolbox wants to use your confidential information"
-dialog for the vault key comes back after each rebuild. Fix it once per Mac:
-
-```sh
-make signing   # creates and trusts a "Toolbox Local Signing" certificate (asks for your password)
-make app       # now signed with it; the next launch asks once, then stays quiet
-```
+dialog for the vault key comes back after each rebuild. `make signing`
+fixes it once per Mac by creating and trusting a "Toolbox Local Signing"
+certificate; the next launch asks once, then stays quiet.
 
 `make app` prefers, in order: `TOOLBOX_SIGN_IDENTITY`, a Developer ID
 Application identity, an Apple Development identity, Toolbox Local Signing,

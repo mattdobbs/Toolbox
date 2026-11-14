@@ -17,9 +17,23 @@ the owner provided is in `docs/royalts-reference/`. The owner's Royal layout to
 mirror: document "Work" → folder "ACME" → dynamic folders "1Password" and the
 AD provider (OU hierarchy), folder "Jump Boxes".
 
-Repo: https://github.com/mattdobbs/Toolbox.git. Work happens on branch
-`toolbox-phases-1-3`; `main` only has the initial commit and the branch
-fast-forwards onto it. The owner decides when to merge.
+Repo: https://github.com/mattdobbs/Toolbox.git. **One branch: `main`.**
+The owner asked for a single branch on 2026-11-14; commit and push to `main`
+directly and do not create feature branches unless they ask. The old
+`toolbox-phases-1-3` branch was merged and deleted.
+
+## Starting a session on either Mac
+
+1. `git status` and `git pull` on `main`. If the working tree only shows
+   `App/`, `core/` or `build/` as untracked and the source is missing, a GUI
+   client (GitKraken did this once) switched to a stale branch: run
+   `git checkout main && git pull` and never stage those folders. They hold
+   build caches (`core/target` alone is ~14 GB) and `build/e2e` holds test
+   private keys.
+2. `make core && make app` (core first: bindings and the static library are
+   generated, not in git). Then `make test`.
+3. Read **Current state** at the end of this file, then carry on.
+4. Before ending: update Current state, commit to `main`, push.
 
 ## Layout
 
@@ -45,13 +59,20 @@ fast-forwards onto it. The owner decides when to merge.
 
 ## First time on a Mac
 
-1. Xcode installed (the SwiftUI macro plugin is borrowed from it; the
-   license need not be accepted for `make app`). Command Line Tools too.
-2. `rustup` stable toolchain; `cargo install cargo-audit` optional.
-3. `brew install xcodegen` only if you want `make xcode` / the Xcode project
-   (that path also needs `sudo xcodebuild -license accept`).
+The full dependency table is in README.md ("Dependencies"). In short:
+
+1. Apple silicon Mac, macOS 14+. Xcode at `/Applications/Xcode.app`
+   (built with 27.2; the SwiftUI macro plugin is borrowed from it, the
+   license need not be accepted for `make app`) and the Command Line Tools
+   (`xcode-select -p` should print `/Library/Developer/CommandLineTools`;
+   the scripts unset `DEVELOPER_DIR`).
+2. Rust via rustup, stable (built with 1.100). Network on first build:
+   crates.io, IronRDP from GitHub, SwiftTerm and RoyalVNCKit via SwiftPM.
+3. Optional: `brew install 1password-cli` (providers), `brew install
+   xcodegen` (`make xcode`, needs `sudo xcodebuild -license accept`),
+   `cargo install cargo-audit`, `brew install gh`.
 4. `make core` then `make app` → `build/Toolbox.app`. `make test` → Rust
-   tests (35 as of 2026-11-13). `make run` launches the bundle.
+   tests (35 as of 2026-11-14). `make run` launches the bundle.
 5. `make signing` once (asks for the login password): creates and trusts a
    self-signed "Toolbox Local Signing" certificate so the app's signature
    stays stable across builds and the Keychain's "Always Allow" for the
@@ -113,11 +134,14 @@ as `Toolbox-*.ips` (JSON: header line, then body with `threads[].frames`).
 
 ## Conventions
 
-- Commit only when the owner asks. Commit messages end with
-  `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`; PR bodies with
+- Commit only when the owner asks, on `main`. Commit messages end with the
+  co-author line for the Claude model doing the work, e.g.
+  `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`; PR bodies with
   `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
 - Before committing: scan the diff for keys/tokens, make sure no temporary
   probe code is left, run `make test`, and update **Current state** below.
+  Never commit `build/`, `core/target/`, `App/.build/`, generated bindings
+  or `App/Vendor/` (all gitignored); binaries are not shared through git.
 - Keep `README.md` "What works" and `docs/SECURITY-REVIEW.md` (an addendum
   per security-relevant change) current.
 - Secrets never go in `connections.json`; they live in the vault,
@@ -171,8 +195,10 @@ forwards, a Tasks concept like Royal's, terminal theme picker.
 
 ## Current state (update in every commit)
 
-As of 2026-11-13, after commit 63bd487 (pane-close crash fix). This commit
-adds this file and `tools/e2e/`.
+As of 2026-11-14, on `main`. This commit consolidates onto `main` (the
+`toolbox-phases-1-3` branch was identical and is deleted), documents the
+dependencies and fresh-Mac setup in README.md, and adds the session
+checklist above. No code changes since 63bd487 (pane-close crash fix).
 
 Done and verified end to end: SSH terminals, SFTP browser, RDP (Display
 Control resize) and VNC panes; vault with Keychain key + Touch ID; 1Password
@@ -183,6 +209,8 @@ session end; connection auth methods (existing credential, specify
 username/password, folder's credential, agent, key file, ask) with the
 username under the method; folder credentials with inheritance and key
 badge; stable code signing path; closing a focused pane no longer crashes.
+On 2026-11-14 the full test suite (35) passed, clippy was clean, and both
+debug and release bundles built and launched on the desktop Mac.
 
 Pending: the owner still has to run `make signing` on each Mac (it needs their
 password). Nothing else is in flight.
