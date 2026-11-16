@@ -675,7 +675,7 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
             menu.addItem(.separator())
             menu.addItem(item("Delete") { [self] in actions.deleteProvider(provider) })
         case .connection(let connection):
-            menu.addItem(item("Connect") { [self] in actions.openConnection(connection) })
+            menu.addItem(item(connection.kind.isFileTransfer ? "Open" : "Connect") { [self] in actions.openConnection(connection) })
             if connection.kind == .ssh {
                 menu.addItem(item("Browse Files (SFTP)") { [self] in actions.browseFiles(connection) })
             }

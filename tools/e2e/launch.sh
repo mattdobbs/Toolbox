@@ -4,7 +4,7 @@
 #   tools/e2e/launch.sh [--fixture dir] [app args…]
 #   tools/e2e/launch.sh --connect echo --connect echo-1p
 # App args: --connect <id>, --files <id> (repeatable), --expand-all,
-# --demo-move, --demo-close, --edit-connection <id|new>,
+# --demo-move, --demo-close, --edit-connection <id|new>, --edit-provider <id|new>,
 # --set-folder-credential <path>, --unlock-vault.
 set -euo pipefail
 

@@ -43,6 +43,9 @@ sed -e "s|@DIR@|$DIR|g" > "$DIR/store.json" <<'STORE'
     {"id":"echo-folder","name":"jump02 (folder credential)","kind":"Ssh","host":"127.0.0.1","port":2222,"username":"","auth":"FolderCredential","folder":"Jump Boxes","tags":[],"source":null},
     {"id":"rdp-local","name":"Local RDP (test server)","kind":"Rdp","host":"127.0.0.1","port":3390,"username":"","auth":{"Credential":{"credential_id":"op-fake:i1"}},"folder":null,"tags":[],"source":null},
     {"id":"vnc-local","name":"Local VNC (nothing listening)","kind":"Vnc","host":"127.0.0.1","port":5900,"username":"","auth":{"Credential":{"credential_id":"op-fake:i1"}},"folder":null,"tags":[],"source":null},
+    {"id":"sftp-local","name":"Files over SFTP (echo server)","kind":"Sftp","host":"127.0.0.1","port":2222,"username":"demo","auth":{"KeyFile":{"path":"@DIR@/user_key"}},"folder":"File Transfer","tags":[],"source":null},
+    {"id":"ftp-local","name":"Files over FTP (plain)","kind":"Ftp","host":"127.0.0.1","port":2121,"username":"","auth":{"Credential":{"credential_id":"op-fake:i1"}},"folder":"File Transfer","tags":[],"source":null},
+    {"id":"ftps-local","name":"Files over FTPS (self-signed)","kind":"Ftps","host":"127.0.0.1","port":2122,"username":"","auth":{"Credential":{"credential_id":"op-fake:i1"}},"folder":"File Transfer","tags":[],"source":null},
     {"id":"ad:dc01","name":"DC01","kind":"Rdp","host":"dc01.corp.example","port":3389,"username":"demo","auth":{"Credential":{"credential_id":"op-fake:i1"}},"folder":"ACME/CORP-AD/Domain Controllers","tags":["ad"],"source":"ad-fake"},
     {"id":"ad:sql01","name":"SQL01","kind":"Rdp","host":"sql01.corp.example","port":3389,"username":"demo","auth":{"Credential":{"credential_id":"op-fake:i1"}},"folder":"ACME/CORP-AD/Datacenter Servers/Database Servers","tags":["ad"],"source":"ad-fake"},
     {"id":"ad:web01","name":"WEB01","kind":"Ssh","host":"web01.corp.example","port":22,"username":"demo","auth":{"Credential":{"credential_id":"op-fake:i1"}},"folder":"ACME/CORP-AD/Datacenter Servers/Web Servers","tags":["ad"],"source":"ad-fake"},
@@ -51,13 +54,14 @@ sed -e "s|@DIR@|$DIR|g" > "$DIR/store.json" <<'STORE'
   "credentials": [
     {"id":"op-fake:i1","name":"Echo login","username":"demo","kind":{"OnePassword":{"item_id":"i1","account":"work","op_path":"@DIR@/op"}},"folder":"ACME/1Password/work","has_private_key":false,"tags":["login"],"source":"op-fake"},
     {"id":"op-fake:i2","name":"Lab SSH key","username":"","kind":{"OnePassword":{"item_id":"i2","account":"work","op_path":"@DIR@/op"}},"folder":"ACME/1Password/work","has_private_key":true,"tags":["ssh_key"],"source":"op-fake"},
-    {"id":"folder-user","name":"Folder user (asks)","username":"folderuser","kind":"Prompt","folder":"Jump Boxes","has_private_key":false,"tags":[],"source":null}
+    {"id":"folder-user","name":"Folder user (asks)","username":"folderuser","kind":"Prompt","folder":"Jump Boxes","has_private_key":false,"tags":[],"source":null},
+    {"id":"ad-fake#bind","name":"CORP-AD bind account","username":"CORP\\svc-toolbox","kind":"Vault","folder":"ACME/CORP-AD","has_private_key":false,"tags":["provider-account"],"source":null}
   ],
   "providers": [
     {"id":"op-fake","name":"1Password","kind":{"OnePassword":{"op_path":"@DIR@/op","account":"work","vaults":["work"]}},"folder":"ACME/1Password","auto_refresh_minutes":60,"last_sync_epoch":null,"last_status":null},
-    {"id":"ad-fake","name":"CORP-AD","kind":{"ActiveDirectory":{"server":"dc01.corp.example","search_base":"DC=corp,DC=example","bind_credential_id":"op-fake:i1","admin_credential_id":"op-fake:i1","user_credential_id":"op-fake:i1","allow_plain_ldap":false,"accept_invalid_certs":false}},"folder":"ACME/CORP-AD","auto_refresh_minutes":0,"last_sync_epoch":null,"last_status":"fixture: never synced"}
+    {"id":"ad-fake","name":"CORP-AD","kind":{"ActiveDirectory":{"server":"dc01.corp.example","search_base":"DC=corp,DC=example","bind_credential_id":"ad-fake#bind","admin_credential_id":"op-fake:i1","user_credential_id":null,"allow_plain_ldap":false,"accept_invalid_certs":false}},"folder":"ACME/CORP-AD","auto_refresh_minutes":0,"last_sync_epoch":null,"last_status":"fixture: never synced"}
   ],
-  "folders": ["ACME", "Jump Boxes"],
+  "folders": ["ACME", "File Transfer", "Jump Boxes"],
   "folder_credentials": {"Jump Boxes": "folder-user"}
 }
 STORE

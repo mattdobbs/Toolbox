@@ -22,6 +22,14 @@ required-features = ["test-support"]
 name = "echo_server"
 required-features = ["test-support"]
 
+[[example]]
+name = "ftp_server"
+required-features = ["test-support"]
+
+[[test]]
+name = "ftp"
+required-features = ["test-support"]
+
 [[test]]
 name = "sftp"
 required-features = ["test-support"]
@@ -34,7 +42,7 @@ required-features = ["test-support"]
 default = []
 cli = ["uniffi/cli"]
 # In-process RDP server for tests and the `rdp_server` example.
-test-support = ["ironrdp/server", "ironrdp/acceptor", "dep:rcgen", "dep:async-trait", "dep:tempfile"]
+test-support = ["ironrdp/server", "ironrdp/acceptor", "dep:rcgen", "dep:async-trait", "dep:tempfile", "dep:libunftp", "dep:unftp-sbe-fs", "dep:unftp-core"]
 
 [dependencies]
 uniffi = { version = "0.32", features = ["tokio"] }
@@ -62,6 +70,13 @@ rcgen = { version = "0.14", optional = true }
 tempfile = { version = "3", optional = true }
 async-trait = { version = "0.1", optional = true }
 bytes = "1"
+# FTP and explicit FTPS for File Transfer connections.
+suppaftp = { version = "12", features = ["tokio-async-native-tls"] }
+async-native-tls = { version = "0.6", default-features = false, features = ["runtime-tokio"] }
+# In-process FTP server for tests and the `ftp_server` example.
+libunftp = { version = "0.25", optional = true }
+unftp-sbe-fs = { version = "0.4", optional = true }
+unftp-core = { version = "0.1", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

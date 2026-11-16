@@ -139,16 +139,22 @@ to Unlock Vault.
 - Providers (dynamic folders): a 1Password provider turns vault items into
   credentials via the `op` CLI; an Active Directory provider turns computer
   objects into connections (Windows → RDP, macOS → VNC, Linux → SSH, OUs as
-  folders, Domain Controllers get the admin credential). Providers refresh at
-  launch and on a timer, or on demand with ⌘R.
+  folders, Domain Controllers get the admin credential). Each of the AD
+  provider's accounts (bind, domain controllers, other computers) can use an
+  existing credential or a username and password typed into the provider,
+  which is kept in the vault as a credential inside the provider's folder.
+  Providers refresh at launch and on a timer, or on demand with ⌘R.
 
 - RDP through IronRDP: NLA logon, the desktop follows the pane size through
   Display Control (falling back to a reconnect at the new size), frames land
   in an IOSurface-backed layer, full keyboard and mouse.
 - VNC through RoyalVNCKit, the engine Royal TS itself ships.
-- SFTP file browsing for any SSH connection (sidebar context menu, ⌘⇧F, or
-  the toolbar): navigate, upload, download with progress, new folder, rename
-  and delete.
+- File Transfer connections (Type ▸ File Transfer) over SFTP, FTP over TLS
+  (explicit FTPS) or plain FTP, opening a file browser: navigate, upload,
+  download with progress, new folder, rename and delete. An FTPS server with
+  a self-signed or private certificate asks before connecting; plain FTP is
+  labelled as unencrypted. Any SSH connection can also open the same browser
+  over SFTP (sidebar context menu, ⌘⇧F, or the toolbar).
 
 ## Trying it without real hosts
 
@@ -163,6 +169,7 @@ cd core
 cargo run --example echo_server --features test-support -- --key <openssh-private-key>   # SSH + SFTP on 127.0.0.1:2222, demo / secret
                                                        # add --exit-after <secs> to have shells log out on their own
 cargo run --example rdp_server --features test-support                                   # RDP on 127.0.0.1:3390, demo / secret
+cargo run --example ftp_server --features test-support -- --port 2121 [--tls]            # FTP or FTPS, demo / secret
 ```
 
 Launch overrides for a throwaway setup: `TOOLBOX_STORE_PATH`,

@@ -22,14 +22,21 @@ pub enum ConnectionKind {
     Ssh,
     Rdp,
     Vnc,
+    /// File Transfer over SSH: opens the file browser, not a terminal.
+    Sftp,
+    /// File Transfer over plain FTP.
+    Ftp,
+    /// File Transfer over FTP upgraded with `AUTH TLS` (explicit FTPS).
+    Ftps,
 }
 
 impl ConnectionKind {
     pub fn default_port(self) -> u16 {
         match self {
-            ConnectionKind::Ssh => 22,
+            ConnectionKind::Ssh | ConnectionKind::Sftp => 22,
             ConnectionKind::Rdp => 3389,
             ConnectionKind::Vnc => 5900,
+            ConnectionKind::Ftp | ConnectionKind::Ftps => 21,
         }
     }
 }
@@ -371,16 +378,10 @@ impl ConnectionStore {
                     provider.last_sync_epoch = old.last_sync_epoch;
                     provider.last_status = old.last_status.clone();
                 }
-                // Generated objects follow a provider whose folder was renamed.
+                // Everything inside a provider's folder (what it generated,
+                // and anything placed there by hand) follows a rename.
                 if old.folder != provider.folder {
-                    let (from, to) = (old.folder.clone(), provider.folder.clone());
-                    let id = provider.id.clone();
-                    for c in doc.connections.iter_mut().filter(|c| c.source.as_deref() == Some(id.as_str())) {
-                        c.folder = c.folder.as_deref().and_then(|f| replace_prefix(f, &from, &to));
-                    }
-                    for c in doc.credentials.iter_mut().filter(|c| c.source.as_deref() == Some(id.as_str())) {
-                        c.folder = c.folder.as_deref().and_then(|f| replace_prefix(f, &from, &to));
-                    }
+                    move_folder_contents(&mut doc, &old.folder, &provider.folder);
                 }
                 doc.providers[index] = provider.clone();
             }
@@ -432,38 +433,7 @@ impl ConnectionStore {
             return Err(CoreError::Invalid("a folder cannot be moved into itself".into()));
         }
         let mut doc = lock_or_recover(&self.doc);
-        for folder in doc.folders.iter_mut() {
-            if let Some(renamed) = replace_prefix(folder, &from, &to) {
-                *folder = renamed;
-            }
-        }
-        for c in doc.connections.iter_mut() {
-            if let Some(renamed) = c.folder.as_deref().and_then(|f| replace_prefix(f, &from, &to)) {
-                c.folder = Some(renamed);
-            }
-        }
-        for c in doc.credentials.iter_mut() {
-            if let Some(renamed) = c.folder.as_deref().and_then(|f| replace_prefix(f, &from, &to)) {
-                c.folder = Some(renamed);
-            }
-        }
-        for p in doc.providers.iter_mut() {
-            if let Some(renamed) = replace_prefix(&p.folder, &from, &to) {
-                p.folder = renamed;
-            }
-        }
-        let moved: Vec<(String, String)> = doc
-            .folder_credentials
-            .iter()
-            .filter_map(|(path, id)| replace_prefix(path, &from, &to).map(|renamed| (renamed, id.clone())))
-            .collect();
-        doc.folder_credentials.retain(|path, _| replace_prefix(path, &from, &to).is_none());
-        doc.folder_credentials.extend(moved);
-        if let Some(parent) = parent_path(&to) {
-            register_folder(&mut doc, &parent);
-        }
-        doc.folders.sort();
-        doc.folders.dedup();
+        move_folder_contents(&mut doc, &from, &to);
         sort_document(&mut doc);
         write_document(&self.path, &doc)?;
         Ok(to)
@@ -629,6 +599,43 @@ fn register_folder(doc: &mut Document, path: &str) {
         }
     }
     doc.folders.sort();
+}
+
+/// Moves everything at or under `from` to `to`: explicit folders,
+/// connections, credentials, providers and folder credential assignments.
+fn move_folder_contents(doc: &mut Document, from: &str, to: &str) {
+    for folder in doc.folders.iter_mut() {
+        if let Some(renamed) = replace_prefix(folder, from, to) {
+            *folder = renamed;
+        }
+    }
+    for c in doc.connections.iter_mut() {
+        if let Some(renamed) = c.folder.as_deref().and_then(|f| replace_prefix(f, from, to)) {
+            c.folder = Some(renamed);
+        }
+    }
+    for c in doc.credentials.iter_mut() {
+        if let Some(renamed) = c.folder.as_deref().and_then(|f| replace_prefix(f, from, to)) {
+            c.folder = Some(renamed);
+        }
+    }
+    for p in doc.providers.iter_mut() {
+        if let Some(renamed) = replace_prefix(&p.folder, from, to) {
+            p.folder = renamed;
+        }
+    }
+    let moved: Vec<(String, String)> = doc
+        .folder_credentials
+        .iter()
+        .filter_map(|(path, id)| replace_prefix(path, from, to).map(|renamed| (renamed, id.clone())))
+        .collect();
+    doc.folder_credentials.retain(|path, _| replace_prefix(path, from, to).is_none());
+    doc.folder_credentials.extend(moved);
+    if let Some(parent) = parent_path(to) {
+        register_folder(doc, &parent);
+    }
+    doc.folders.sort();
+    doc.folders.dedup();
 }
 
 /// `path` with a leading `from` folder replaced by `to`, or `None` when it
@@ -1157,6 +1164,43 @@ esac
             reopened.inherited_credential(Some("Work/X".into())).map(|f| f.credential_id),
             Some("admin".into())
         );
+    }
+
+    #[test]
+    fn provider_rename_carries_manual_items_inside() {
+        let (_dir, store) = open_temp();
+        let mut provider = store
+            .upsert_provider(Provider {
+                id: "ad".into(),
+                name: "corp-ad".into(),
+                kind: ProviderKind::OnePassword { op_path: None, account: None, vaults: vec![] },
+                folder: "Work/corp-ad".into(),
+                auto_refresh_minutes: 0,
+                last_sync_epoch: None,
+                last_status: None,
+            })
+            .unwrap();
+        let mut bind = sample_credential("ad#bind");
+        bind.folder = Some("Work/corp-ad".into());
+        store.upsert_credential(bind).unwrap();
+        provider.folder = "Work/CORP.EXAMPLE".into();
+        store.upsert_provider(provider).unwrap();
+        assert_eq!(store.get_credential("ad#bind".into()).unwrap().folder.as_deref(), Some("Work/CORP.EXAMPLE"));
+        assert!(!store.list_folders().iter().any(|f| f.ends_with("corp-ad")));
+    }
+
+    #[test]
+    fn file_transfer_kinds_round_trip() {
+        let (_dir, store) = open_temp();
+        for (kind, port) in [(ConnectionKind::Sftp, 22), (ConnectionKind::Ftp, 21), (ConnectionKind::Ftps, 21)] {
+            assert_eq!(kind.default_port(), port);
+            let mut c = sample(&format!("{kind:?}"));
+            c.kind = kind;
+            c.port = port;
+            let c = store.upsert(c).unwrap();
+            let reopened = ConnectionStore::open(store.path.to_string_lossy().into()).unwrap();
+            assert_eq!(reopened.get(c.id).unwrap().kind, kind);
+        }
     }
 
     #[test]

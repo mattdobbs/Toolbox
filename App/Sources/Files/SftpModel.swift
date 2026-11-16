@@ -1,8 +1,25 @@
 import AppKit
 import Combine
 
-/// State for one SFTP browser pane: the remote directory being shown and the
-/// transfers in flight.
+/// What the file browser needs from a session. The core's SFTP and FTP
+/// sessions expose identical methods, so both conform as they are.
+protocol FileTransferSession: AnyObject, Sendable {
+    func home() async throws -> String
+    func canonicalize(path: String) async throws -> String
+    func list(path: String) async throws -> [SftpEntry]
+    func download(remote: String, local: String, transferId: String) async throws -> UInt64
+    func upload(local: String, remote: String, transferId: String) async throws -> UInt64
+    func makeDir(path: String) async throws
+    func rename(from: String, to: String) async throws
+    func remove(path: String, directory: Bool) async throws
+    func close() async
+}
+
+extension SftpSession: FileTransferSession {}
+extension FtpSession: FileTransferSession {}
+
+/// State for one file browser pane (SFTP, FTP or FTPS): the remote directory
+/// being shown and the transfers in flight.
 @MainActor
 final class SftpModel: ObservableObject {
     struct Transfer: Identifiable {
@@ -24,7 +41,7 @@ final class SftpModel: ObservableObject {
     @Published var status: String?
     @Published private(set) var transfers: [Transfer] = []
 
-    private var session: SftpSession?
+    private var session: (any FileTransferSession)?
     private var bridge: SftpBridge?
     private var closed = false
 
@@ -53,13 +70,48 @@ final class SftpModel: ObservableObject {
         )
         do {
             let session = try await SftpSession.connect(config: config, listener: bridge)
-            if closed {
-                await session.close()
-                return
-            }
-            self.session = session
-            isConnected = true
-            status = nil
+            await attach(session)
+        } catch {
+            status = describe(error)
+        }
+    }
+
+    /// FTP, or explicit FTPS when `secure`. Plain FTP sends the password
+    /// unencrypted, which the status line says while connecting.
+    func connectFtp(username: String, password: String, secure: Bool) async {
+        status = secure
+            ? "Connecting to \(username)@\(connection.host) over FTPS…"
+            : "Connecting to \(username)@\(connection.host) over plain FTP (not encrypted)…"
+        busy = true
+        defer { busy = false }
+        let bridge = SftpBridge(owner: self)
+        self.bridge = bridge
+        let config = FtpConfig(
+            host: connection.host,
+            port: connection.port,
+            username: username,
+            password: password,
+            secure: secure,
+            acceptInvalidCerts: false,
+            connectTimeoutSecs: 15
+        )
+        do {
+            let session = try await FtpSession.connect(config: config, listener: bridge)
+            await attach(session)
+        } catch {
+            status = describe(error)
+        }
+    }
+
+    private func attach(_ session: any FileTransferSession) async {
+        if closed {
+            await session.close()
+            return
+        }
+        self.session = session
+        isConnected = true
+        status = nil
+        do {
             let home = try await session.home()
             await load(home)
         } catch {
@@ -267,7 +319,7 @@ final class SftpModel: ObservableObject {
 }
 
 /// Core callbacks arrive on Tokio threads.
-final class SftpBridge: SftpListener, @unchecked Sendable {
+final class SftpBridge: SftpListener, FtpListener, @unchecked Sendable {
     private weak var owner: SftpModel?
     private let lock = NSLock()
 
@@ -286,6 +338,19 @@ final class SftpBridge: SftpListener, @unchecked Sendable {
         DispatchQueue.main.sync {
             MainActor.assumeIsolated {
                 accepted = Prompts.confirmHostKey(host: host, port: port, keyType: keyType, fingerprint: fingerprint)
+            }
+        }
+        return accepted
+    }
+
+    func confirmUntrustedCertificate(host: String, reason: String) -> Bool {
+        var accepted = false
+        DispatchQueue.main.sync {
+            MainActor.assumeIsolated {
+                accepted = Prompts.confirm(
+                    title: "The certificate for \(host) is not trusted",
+                    message: "\(reason)\n\nThe connection would be encrypted, but Toolbox cannot confirm it is talking to \(host). Continue only if you expect this server to use a self-signed or private certificate.",
+                    ok: "Connect Anyway")
             }
         }
         return accepted

@@ -2,6 +2,8 @@
 # Starts or stops the local test servers the fixture points at:
 #   SSH + SFTP echo server on 127.0.0.1:2222 (demo / secret; any public key)
 #   IronRDP test server   on 127.0.0.1:3390 (demo / secret)
+#   FTP server            on 127.0.0.1:2121 (demo / secret)
+#   FTPS (explicit TLS)   on 127.0.0.1:2122 (demo / secret, self-signed)
 #
 #   tools/e2e/servers.sh start [fixture-dir] [--exit-after <secs>]
 #   tools/e2e/servers.sh stop
@@ -23,17 +25,25 @@ case "${1:-}" in
     BIN="$CORE/target/debug/examples"
     pkill -f "examples/echo_server" 2>/dev/null || true
     pkill -f "examples/rdp_server" 2>/dev/null || true
+    pkill -f "examples/ftp_server" 2>/dev/null || true
+    mkdir -p "$DIR/ftp-root/docs"
+    echo "Toolbox test FTP server" > "$DIR/ftp-root/readme.txt"
+    echo "nested file" > "$DIR/ftp-root/docs/notes.txt"
     nohup "$BIN/echo_server" --key "$DIR/host_key" --port 2222 "$@" > "$DIR/echo_server.log" 2>&1 &
     nohup "$BIN/rdp_server" > "$DIR/rdp_server.log" 2>&1 &
+    nohup "$BIN/ftp_server" --port 2121 --root "$DIR/ftp-root" > "$DIR/ftp_server.log" 2>&1 &
+    nohup "$BIN/ftp_server" --port 2122 --root "$DIR/ftp-root" --tls > "$DIR/ftps_server.log" 2>&1 &
+    up() { nc -z -w 1 127.0.0.1 "$1" 2>/dev/null && echo up || echo DOWN; }
     for _ in $(seq 1 30); do
-      nc -z -w 1 127.0.0.1 2222 2>/dev/null && nc -z -w 1 127.0.0.1 3390 2>/dev/null && break
+      [[ "$(up 2222)$(up 3390)$(up 2121)$(up 2122)" == "upupupup" ]] && break
       sleep 1
     done
-    echo "ssh echo: $(nc -z -w 1 127.0.0.1 2222 2>/dev/null && echo up || echo DOWN)   rdp: $(nc -z -w 1 127.0.0.1 3390 2>/dev/null && echo up || echo DOWN)"
+    echo "ssh echo: $(up 2222)   rdp: $(up 3390)   ftp: $(up 2121)   ftps: $(up 2122)"
     ;;
   stop)
     pkill -f "examples/echo_server" 2>/dev/null || true
     pkill -f "examples/rdp_server" 2>/dev/null || true
+    pkill -f "examples/ftp_server" 2>/dev/null || true
     echo "test servers stopped"
     ;;
   *)

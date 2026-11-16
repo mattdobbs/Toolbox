@@ -160,3 +160,30 @@ quiet across rebuilds after that.
   folder with a prompt-type credential asked for that credential's username;
   a stored-password connection with nothing in the vault reported it instead
   of connecting.
+
+## Addendum — 2026-11-16: File Transfer connections and provider accounts
+
+- **FTP** sends the password and file contents unencrypted. The editor
+  labels it "FTP (not encrypted)" with a warning, and the browser's status
+  line says so while connecting. SFTP and FTPS are offered first.
+- **FTPS** verifies the server certificate with the system trust store.
+  When verification fails the user sees the reason and decides; "Connect
+  Anyway" keeps encryption but not server authentication, for that one
+  connection only (nothing is remembered). Tests cover refuse, accept and
+  pre-approved paths.
+- **Listing names** from FTP servers get the same guard as SFTP: names
+  containing `/`, NUL, `.` or `..` are dropped, so a hostile server cannot
+  steer a download outside the chosen folder.
+- **Provider-owned accounts** for AD are ordinary vault credentials (same
+  encryption and Touch ID gate), removed with their secret when the
+  provider stops using them or is deleted.
+- **Active Directory finding**: every domain controller behind
+  dc01.corp.example presents a 1024-bit RSA certificate, which macOS
+  refuses. Verified LDAPS is impossible until those are reissued; the
+  "Accept untrusted certificates" option keeps the bind encrypted but
+  unauthenticated, which is still far better than the plain-LDAP fallback
+  (that sends the bind password in clear and defaults to on — flagged to
+  the owner, not changed).
+- `cargo audit` unchanged by the new crates (suppaftp, async-native-tls;
+  libunftp only under `test-support`).
+

@@ -40,10 +40,11 @@ directly and do not create feature branches unless they ask. The old
 - `core/toolbox-core/` — Rust core (edition 2021) exposed through UniFFI
   0.32: `ssh.rs` (russh), `sftp.rs` (russh-sftp), `rdp.rs` (IronRDP,
   git-pinned), `vault.rs` (XChaCha20-Poly1305), `onepassword.rs` (`op`
-  subprocess), `ad.rs` (ldap3), `store.rs` (connections/credentials/
+  subprocess), `ad.rs` (ldap3), `ftp.rs` (FTP / explicit FTPS via suppaftp), `store.rs` (connections/credentials/
   providers/folders JSON document), `error.rs`. Test servers behind the
-  `test-support` feature: `ssh_test_server.rs`, `rdp_test_server.rs`;
-  examples `echo_server` (SSH+SFTP :2222) and `rdp_server` (:3390), both
+  `test-support` feature: `ssh_test_server.rs`, `rdp_test_server.rs`,
+  `ftp_test_server.rs` (libunftp); examples `echo_server` (SSH+SFTP :2222),
+  `rdp_server` (:3390) and `ftp_server` (`--port`, `--tls`), all
   demo/secret.
 - `App/` — SwiftPM package. AppKit shell: `App/` (delegate, menu),
   `Workspace/` (window = workspace tab, `PaneContainerViewController`,
@@ -72,7 +73,7 @@ The full dependency table is in README.md ("Dependencies"). In short:
    xcodegen` (`make xcode`, needs `sudo xcodebuild -license accept`),
    `cargo install cargo-audit`, `brew install gh`.
 4. `make core` then `make app` → `build/Toolbox.app`. `make test` → Rust
-   tests (35 as of 2026-11-14). `make run` launches the bundle.
+   tests (40 as of 2026-11-16). `make run` launches the bundle.
 5. `make signing` once (asks for the login password): creates and trusts a
    self-signed "Toolbox Local Signing" certificate so the app's signature
    stays stable across builds and the Keychain's "Always Allow" for the
@@ -106,7 +107,7 @@ running; they once tested a stale instance and reported a missing feature.
 
 ```sh
 tools/e2e/make-fixture.sh            # keys, known_hosts, fake op, store → build/e2e
-tools/e2e/servers.sh start           # echo SSH+SFTP :2222 and RDP :3390 (add --exit-after 6 for auto-close)
+tools/e2e/servers.sh start           # SSH+SFTP :2222, RDP :3390, FTP :2121, FTPS :2122 (add --exit-after 6 for auto-close)
 tools/e2e/launch.sh --connect echo --connect echo-1p   # relaunch against the fixture, Touch ID skipped
 tools/e2e/capture.sh                 # screenshot every Toolbox window into build/e2e/shots, report dialogs
 tools/e2e/servers.sh stop
@@ -114,15 +115,21 @@ tools/e2e/servers.sh stop
 
 Fixture ids: `echo` (key file, folder Jump Boxes), `echo-1p` (1Password
 credential through the fake `op`), `echo-folder` (folder credential →
-prompts as `folderuser`), `rdp-local`, `vnc-local`, plus AD-style generated
-connections under `ACME/CORP-AD/…`. The fixture uses its own Keychain item
+prompts as `folderuser`), `rdp-local`, `vnc-local`, File Transfer
+connections `sftp-local`, `ftp-local`, `ftps-local` (self-signed, so it
+prompts), plus AD-style generated connections under `ACME/CORP-AD/…`. The
+`ad-fake` provider binds with a provider-owned account (`ad-fake#bind`),
+uses an existing credential for domain controllers and none for others. The fixture uses its own Keychain item
 (`TOOLBOX_KEYCHAIN_SERVICE`); delete it afterwards with
 `security delete-generic-password -s com.dobbs.Toolbox.vault-key.e2e`.
 
 Launch args: `--connect <id>` / `--files <id>` (repeatable), `--expand-all`,
 `--demo-move` (focused pane → new workspace), `--demo-close` (close the
 focused pane after 3 s), `--edit-connection <id|new>`,
-`--set-folder-credential <path>`, `--unlock-vault`; defaults override
+`--edit-provider <id|new>`, `--set-folder-credential <path>`,
+`--demo-provider-account <provider-id>` (saves a typed-in bind account,
+then switches to an existing credential, logging each step),
+`--unlock-vault`; defaults override
 `-vaultRequiresAuth NO`. Env: `TOOLBOX_STORE_PATH`, `TOOLBOX_VAULT_PATH`,
 `TOOLBOX_KNOWN_HOSTS`, `TOOLBOX_KEYCHAIN_SERVICE`.
 
@@ -179,6 +186,22 @@ as `Toolbox-*.ips` (JSON: header line, then body with `threads[].frames`).
   `StoredPassword` (secret in the vault under the connection id),
   `FolderCredential` (nearest folder's assignment; store keeps a path →
   credential map). Credential-based methods take the credential's username.
+- `ConnectionKind`: `Ssh`, `Rdp`, `Vnc`, and File Transfer kinds `Sftp`,
+  `Ftp`, `Ftps` (explicit `AUTH TLS`). File Transfer connections open the
+  file browser (`SftpPaneView`/`SftpModel`), which talks to either
+  `SftpSession` or `FtpSession` through the Swift `FileTransferSession`
+  protocol; the two core objects must keep identical method signatures.
+  `usesSsh` (ssh, sftp) decides key/agent auth; FTP uses username +
+  password unsplit (`CredentialResolver.ftpAuth`).
+- AD provider accounts typed into the provider are vault credentials with
+  id `<providerId>#bind|admin|user`, folder = the provider's folder, tag
+  `provider-account`. `AppModel.saveProvider(draft)` writes them before
+  the provider and deletes ones no longer used; deleting the provider
+  deletes them. Renaming a provider moves everything inside its folder.
+- Every DC behind dc01.corp.example presents a 1024-bit RSA LDAPS
+  certificate (checked 2026-11-16); macOS refuses those, so verified LDAPS
+  cannot work there until they are reissued. The working provider
+  uses "Accept untrusted certificates".
 
 ## Not verified against real infrastructure
 
@@ -195,22 +218,31 @@ forwards, a Tasks concept like Royal's, terminal theme picker.
 
 ## Current state (update in every commit)
 
-As of 2026-11-14, on `main`. This commit consolidates onto `main` (the
-`toolbox-phases-1-3` branch was identical and is deleted), documents the
-dependencies and fresh-Mac setup in README.md, and adds the session
-checklist above. No code changes since 63bd487 (pane-close crash fix).
+As of 2026-11-16, on `main`.
 
-Done and verified end to end: SSH terminals, SFTP browser, RDP (Display
-Control resize) and VNC panes; vault with Keychain key + Touch ID; 1Password
-and AD providers; Royal-style sidebar tree with folders, drag and drop and
-context menus; draggable pane layouts with persisted ratios; tabbed
-workspaces with pane moves and tab rename; automatic pane close on clean
-session end; connection auth methods (existing credential, specify
-username/password, folder's credential, agent, key file, ask) with the
-username under the method; folder credentials with inheritance and key
-badge; stable code signing path; closing a focused pane no longer crashes.
-On 2026-11-14 the full test suite (35) passed, clippy was clean, and both
-debug and release bundles built and launched on the desktop Mac.
+This change set: File Transfer connections (SFTP, FTP, explicit FTPS) with
+a Rust FTP client (`ftp.rs`, 3 integration tests against libunftp,
+including the untrusted-certificate prompt) reusing the file browser; AD
+provider accounts can each be an existing credential (grouped picker) or a
+username/password typed into the provider (provider-owned vault
+credential); credential pickers label untitled 1Password items by
+username; provider renames carry everything inside the folder. Verified
+end to end with the fixture: FTP and SFTP browsers listing, FTPS prompt,
+provider editor, FTPS connection editor, and the provider-account
+save/switch/cleanup lifecycle. 40 Rust tests, clippy clean, audit
+unchanged.
 
-Pending: the owner still has to run `make signing` on each Mac (it needs their
-password). Nothing else is in flight.
+Diagnosed 2026-11-16 (no code change): the owner's failing "corp-ad" AD providers
+fail because DC certificates are 1024-bit and their 1Password bind item
+has a stale password; the "CORP.EXAMPLE" provider works. Offered but not
+done: default "Fall back to unencrypted LDAP" to off, a key-size hint in
+the error, pinning CorpRootCA.
+
+Done earlier and verified: SSH, SFTP, RDP and VNC panes; vault with
+Keychain key + Touch ID; 1Password and AD providers; Royal-style sidebar
+tree; draggable pane layouts; tabbed workspaces with pane moves and tab
+rename; automatic pane close; connection auth methods with the username
+under the method; folder credentials; stable code signing path; pane-close
+crash fix.
+
+Pending: the owner still has to run `make signing` on each Mac.

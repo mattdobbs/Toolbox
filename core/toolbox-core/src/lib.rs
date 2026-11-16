@@ -7,6 +7,9 @@ uniffi::setup_scaffolding!();
 
 pub mod ad;
 pub mod error;
+pub mod ftp;
+#[cfg(feature = "test-support")]
+pub mod ftp_test_server;
 pub mod onepassword;
 pub mod rdp;
 #[cfg(feature = "test-support")]

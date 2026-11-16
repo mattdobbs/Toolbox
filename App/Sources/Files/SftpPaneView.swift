@@ -2,7 +2,7 @@ import AppKit
 import Combine
 import SwiftUI
 
-/// An SFTP browser living in a workspace pane.
+/// A file browser (SFTP, FTP or FTPS) living in a workspace pane.
 final class SftpPaneView: NSView, PaneContent {
     let connection: Connection
     let model: SftpModel
@@ -53,6 +53,10 @@ final class SftpPaneView: NSView, PaneContent {
 
     func start(username: String, auth: SshAuth) {
         Task { await model.connect(username: username, auth: auth) }
+    }
+
+    func startFtp(username: String, password: String, secure: Bool) {
+        Task { await model.connectFtp(username: username, password: password, secure: secure) }
     }
 
     func cancelled() {

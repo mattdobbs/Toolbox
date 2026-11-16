@@ -228,8 +228,36 @@ final class AppModel: ObservableObject {
         return stored
     }
 
+    /// Saves a provider from its editor: accounts typed into the provider are
+    /// written to the vault first, then the provider, then accounts it no
+    /// longer uses are removed.
+    @discardableResult
+    func saveProvider(_ draft: ProviderDraft) async throws -> Provider {
+        let record = draft.provider()
+        for account in draft.managedAccounts(folder: record.folder) {
+            let secret = Secret(password: account.password, privateKey: nil, passphrase: nil)
+            try await saveCredential(account.credential, secret: secret)
+        }
+        let stored = try saveProvider(record)
+        let inUse = Set(ProviderRole.allCases.compactMap { draft.credentialId($0) })
+        for credential in managedCredentials(of: stored.id) where !inUse.contains(credential.id) {
+            try deleteCredential(credential)
+        }
+        return stored
+    }
+
+    /// Vault credentials a provider owns (typed into its editor).
+    func managedCredentials(of providerId: String) -> [Credential] {
+        let prefix = "\(providerId)#"
+        return credentials.filter { $0.id.hasPrefix(prefix) && $0.source == nil }
+    }
+
     func deleteProvider(_ provider: Provider) throws {
+        let owned = managedCredentials(of: provider.id)
         _ = try store.deleteProvider(id: provider.id)
+        for credential in owned {
+            try? deleteCredential(credential)
+        }
         reload()
         ProviderSync.shared.scheduleAutoRefresh()
     }
@@ -253,14 +281,18 @@ extension ConnectionKind {
         case .ssh: return "SSH"
         case .rdp: return "RDP"
         case .vnc: return "VNC"
+        case .sftp: return "SFTP"
+        case .ftp: return "FTP"
+        case .ftps: return "FTPS"
         }
     }
 
     var defaultPort: Int {
         switch self {
-        case .ssh: return 22
+        case .ssh, .sftp: return 22
         case .rdp: return 3389
         case .vnc: return 5900
+        case .ftp, .ftps: return 21
         }
     }
 
@@ -269,6 +301,18 @@ extension ConnectionKind {
         case .ssh: return "terminal"
         case .rdp: return "pc"
         case .vnc: return "display"
+        case .sftp, .ftp, .ftps: return "folder.badge.gearshape"
         }
     }
+
+    /// File Transfer connections open the file browser instead of a session.
+    var isFileTransfer: Bool {
+        switch self {
+        case .sftp, .ftp, .ftps: return true
+        case .ssh, .rdp, .vnc: return false
+        }
+    }
+
+    /// Whether SSH authentication (keys, agent) applies.
+    var usesSsh: Bool { self == .ssh || self == .sftp }
 }

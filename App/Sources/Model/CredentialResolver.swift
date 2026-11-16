@@ -104,12 +104,25 @@ enum CredentialResolver {
 
     /// Username and password for RDP and VNC. `nil` means the user cancelled.
     static func passwordAuth(for connection: Connection) async throws -> ResolvedPassword? {
+        guard let raw = try await usernameAndPassword(for: connection) else { return nil }
+        return split(username: raw.username, password: raw.password)
+    }
+
+    /// Username and password for FTP: the username is used exactly as
+    /// written, without splitting off a Windows domain.
+    static func ftpAuth(for connection: Connection) async throws -> (username: String, password: String)? {
+        try await usernameAndPassword(for: connection)
+    }
+
+    /// The username (as written) and password a connection resolves to.
+    /// `nil` means the user cancelled a prompt.
+    private static func usernameAndPassword(for connection: Connection) async throws -> (username: String, password: String)? {
         switch connection.auth {
         case .password:
             let who = connection.username.isEmpty ? connection.host : "\(connection.username)@\(connection.host)"
             guard let password = Prompts.askSecret(title: "Password for \(who)",
                                                    message: "This connection asks every time.") else { return nil }
-            return split(username: connection.username, password: password)
+            return (connection.username, password)
         case .credential(let id):
             guard let credential = AppModel.shared.credential(id) else {
                 throw ResolveError.missingCredential(id)
@@ -118,19 +131,19 @@ enum CredentialResolver {
         case .folderCredential:
             return try await password(with: folderCredential(for: connection), for: connection)
         case .storedPassword:
-            return split(username: connection.username, password: try await storedPassword(for: connection))
+            return (connection.username, try await storedPassword(for: connection))
         case .keyFile, .agent:
             throw ResolveError.emptyCredential("\(connection.name) (SSH keys don't apply to \(connection.kind.label))")
         }
     }
 
-    private static func password(with credential: Credential, for connection: Connection) async throws -> ResolvedPassword? {
+    private static func password(with credential: Credential, for connection: Connection) async throws -> (username: String, password: String)? {
         guard let secret = try await secret(for: credential, purpose: "connect to \(connection.name)") else {
             return nil
         }
         guard let password = secret.password else { throw ResolveError.emptyCredential(credential.name) }
         let username = connection.username.isEmpty ? (secret.username ?? credential.username) : connection.username
-        return split(username: username, password: password)
+        return (username, password)
     }
 
     private static func split(username: String, password: String) -> ResolvedPassword {

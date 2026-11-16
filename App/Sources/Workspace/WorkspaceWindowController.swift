@@ -80,8 +80,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
 
     /// Opens a connection in `pane`, or in the pane a new session should use.
     func open(_ connection: Connection, in target: PaneView? = nil) {
+        if connection.kind.isFileTransfer {
+            openFiles(connection, in: target)
+            return
+        }
         let pane = target ?? paneVC.paneForNewSession()
         switch connection.kind {
+        case .sftp, .ftp, .ftps:
+            return
         case .ssh:
             let session = TerminalSessionView(connection: connection)
             pane.setContent(session)
@@ -130,23 +136,34 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         }
     }
 
-    /// Opens an SFTP browser for an SSH connection in a new pane.
-    func openFiles(_ connection: Connection) {
-        guard connection.kind == .ssh else {
-            Prompts.info(title: "File browsing needs SSH", message: "SFTP runs over SSH; this connection is \(connection.kind.label).")
+    /// Opens a file browser: SFTP for SSH and SFTP connections, FTP or FTPS
+    /// for those kinds.
+    func openFiles(_ connection: Connection, in target: PaneView? = nil) {
+        guard connection.kind.usesSsh || connection.kind.isFileTransfer else {
+            Prompts.info(title: "File browsing needs SSH or FTP",
+                         message: "This connection is \(connection.kind.label). Create a File Transfer connection for the host instead.")
             return
         }
-        let pane = paneVC.paneForNewSession()
+        let pane = target ?? paneVC.paneForNewSession()
         let files = SftpPaneView(connection: connection)
         pane.setContent(files)
         paneVC.setFocus(pane.id, makeFirstResponder: true)
         Task { @MainActor in
             do {
-                guard let resolved = try await CredentialResolver.sshAuth(for: connection) else {
-                    files.cancelled()
-                    return
+                if connection.kind.usesSsh {
+                    guard let resolved = try await CredentialResolver.sshAuth(for: connection) else {
+                        files.cancelled()
+                        return
+                    }
+                    files.start(username: resolved.username, auth: resolved.auth)
+                } else {
+                    guard let resolved = try await CredentialResolver.ftpAuth(for: connection) else {
+                        files.cancelled()
+                        return
+                    }
+                    files.startFtp(username: resolved.username, password: resolved.password,
+                                   secure: connection.kind == .ftps)
                 }
-                files.start(username: resolved.username, auth: resolved.auth)
             } catch {
                 files.failed(describe(error))
             }
@@ -254,16 +271,18 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         let editor = ProviderEditorView(
             model: AppModel.shared,
             draft: draft,
-            onSave: { [weak self] record, syncNow in
+            onSave: { [weak self] saved, syncNow in
                 guard let self else { return }
-                do {
-                    let stored = try AppModel.shared.saveProvider(record)
-                    self.endEditor()
-                    if syncNow {
-                        self.syncProvider(stored)
+                Task { @MainActor in
+                    do {
+                        let stored = try await AppModel.shared.saveProvider(saved)
+                        self.endEditor()
+                        if syncNow {
+                            self.syncProvider(stored)
+                        }
+                    } catch {
+                        Prompts.error(title: "Couldn't save the provider", message: describe(error))
                     }
-                } catch {
-                    Prompts.error(title: "Couldn't save the provider", message: describe(error))
                 }
             },
             onCancel: { [weak self] in self?.endEditor() }
@@ -449,7 +468,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(closePane(_:)): return canClosePane
-        case #selector(browseFiles(_:)): return focusedConnection?.kind == .ssh
+        case #selector(browseFiles(_:)): return focusedConnection.map { $0.kind.usesSsh || $0.kind.isFileTransfer } ?? false
         case #selector(movePaneToNewWorkspace(_:)), #selector(movePaneToWorkspace(_:)):
             return paneVC.focusedPane.content != nil
         case #selector(focusNextPane(_:)), #selector(focusPreviousPane(_:)): return paneVC.paneCount > 1
@@ -460,7 +479,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
         switch item.itemIdentifier {
         case Self.closePaneItem: return canClosePane
-        case Self.browseFilesItem: return focusedConnection?.kind == .ssh
+        case Self.browseFilesItem: return focusedConnection.map { $0.kind.usesSsh || $0.kind.isFileTransfer } ?? false
         default: return true
         }
     }

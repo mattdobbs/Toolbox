@@ -18,7 +18,7 @@ enum AuthMethod: String, CaseIterable, Identifiable {
     }
 
     static func available(for kind: ConnectionKind) -> [AuthMethod] {
-        kind == .ssh ? allCases : [.credential, .stored, .folder, .password]
+        kind.usesSsh ? allCases : [.credential, .stored, .folder, .password]
     }
 
     /// Credential-based methods bring their own username; the rest need one.
@@ -26,6 +26,41 @@ enum AuthMethod: String, CaseIterable, Identifiable {
         switch self {
         case .credential, .folder: return false
         case .stored, .agent, .keyFile, .password: return true
+        }
+    }
+}
+
+/// The Type control: File Transfer covers SFTP, FTP and FTPS.
+enum ConnectionFamily: String, CaseIterable, Identifiable {
+    case ssh, rdp, vnc, files
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .ssh: return "SSH"
+        case .rdp: return "RDP"
+        case .vnc: return "VNC"
+        case .files: return "File Transfer"
+        }
+    }
+
+    init(_ kind: ConnectionKind) {
+        switch kind {
+        case .ssh: self = .ssh
+        case .rdp: self = .rdp
+        case .vnc: self = .vnc
+        case .sftp, .ftp, .ftps: self = .files
+        }
+    }
+
+    /// The kind chosen when switching to this family.
+    var defaultKind: ConnectionKind {
+        switch self {
+        case .ssh: return .ssh
+        case .rdp: return .rdp
+        case .vnc: return .vnc
+        case .files: return .sftp
         }
     }
 }
@@ -154,15 +189,27 @@ struct CredentialPicker: View {
         }
     }
 
+    /// "Name (username)", or whichever of the two exists, so items without
+    /// a title still read as something.
+    static func label(_ credential: Credential) -> String {
+        let name = credential.name.trimmingCharacters(in: .whitespaces)
+        let user = credential.username.trimmingCharacters(in: .whitespaces)
+        switch (name.isEmpty, user.isEmpty) {
+        case (false, false): return name == user ? name : "\(name) (\(user))"
+        case (false, true): return name
+        case (true, false): return user
+        case (true, true): return "Untitled credential"
+        }
+    }
+
     @ViewBuilder
     private func section(_ name: String, _ belongs: (Credential) -> Bool) -> some View {
         let items = credentials.filter(belongs)
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            .sorted { Self.label($0).localizedCaseInsensitiveCompare(Self.label($1)) == .orderedAscending }
         if !items.isEmpty {
             Section(name) {
                 ForEach(items) { credential in
-                    Text(credential.username.isEmpty ? credential.name : "\(credential.name) (\(credential.username))")
-                        .tag(Optional(credential.id))
+                    Text(Self.label(credential)).tag(Optional(credential.id))
                 }
             }
         }
@@ -181,10 +228,22 @@ struct ConnectionEditorView: View {
         VStack(spacing: 0) {
             Form {
                 Section("Connection") {
-                    Picker("Type", selection: $draft.kind) {
-                        ForEach([ConnectionKind.ssh, .rdp, .vnc], id: \.self) { Text($0.label).tag($0) }
+                    Picker("Type", selection: Binding(
+                        get: { ConnectionFamily(draft.kind) },
+                        set: { family in
+                            if ConnectionFamily(draft.kind) != family { draft.kind = family.defaultKind }
+                        }
+                    )) {
+                        ForEach(ConnectionFamily.allCases) { Text($0.label).tag($0) }
                     }
                     .pickerStyle(.segmented)
+                    if draft.kind.isFileTransfer {
+                        Picker("Protocol", selection: $draft.kind) {
+                            Text("SFTP (over SSH)").tag(ConnectionKind.sftp)
+                            Text("FTP over TLS (explicit FTPS)").tag(ConnectionKind.ftps)
+                            Text("FTP (not encrypted)").tag(ConnectionKind.ftp)
+                        }
+                    }
                     TextField("Name", text: $draft.name, prompt: Text("nutanix1"))
                     TextField("Host", text: $draft.host, prompt: Text("hostname or IP"))
                     TextField("Port", value: $draft.port, format: .number.grouping(.never))
@@ -193,6 +252,11 @@ struct ConnectionEditorView: View {
                         Text("The desktop follows the pane size.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                    }
+                    if draft.kind == .ftp {
+                        Text("Plain FTP sends the password and files unencrypted. Prefer SFTP or FTPS when the server offers them.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
                     }
                 }
                 Section("Authentication") {

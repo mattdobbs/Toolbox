@@ -95,6 +95,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             let wanted = args[index + 1]
             controller.edit(wanted == "new" ? nil : AppModel.shared.connections.first { $0.id == wanted || $0.name == wanted })
         }
+        if let index = args.firstIndex(of: "--edit-provider"), index + 1 < args.count {
+            let wanted = args[index + 1]
+            controller.editProvider(wanted == "new" ? nil : AppModel.shared.providers.first { $0.id == wanted || $0.name == wanted })
+        }
+        // Testing aid: exercise a provider-owned account's save and removal.
+        if let index = args.firstIndex(of: "--demo-provider-account"), index + 1 < args.count,
+           let provider = AppModel.shared.providers.first(where: { $0.id == args[index + 1] }) {
+            Task { @MainActor in
+                do {
+                    var draft = ProviderDraft(provider)
+                    draft.bind = RoleCredentialDraft(mode: .specify, username: "CORP\\svc-toolbox", password: "fixture-password")
+                    try await AppModel.shared.saveProvider(draft)
+                    let managed = AppModel.shared.managedCredentials(of: provider.id)
+                    let secret = try VaultManager.shared.vault.getSecret(id: ProviderRole.bind.managedId(provider: provider.id))
+                    NSLog("provider-account: saved; managed=\(managed.map(\.id)) folder=\(managed.first?.folder ?? "-") vaultPasswordStored=\(secret.password == "fixture-password")")
+                    draft = ProviderDraft(AppModel.shared.provider(provider.id)!)
+                    NSLog("provider-account: reloaded draft mode=\(draft.bind.mode.rawValue) hasStored=\(draft.bind.hasStored)")
+                    draft.bind = RoleCredentialDraft(mode: .existing, credentialId: "op-fake:i1")
+                    try await AppModel.shared.saveProvider(draft)
+                    let after = AppModel.shared.managedCredentials(of: provider.id)
+                    let bindNow = AppModel.shared.provider(provider.id).flatMap { p -> String? in
+                        if case .activeDirectory(_, _, let bind, _, _, _, _) = p.kind { return bind }
+                        return nil
+                    }
+                    let gone = (try? VaultManager.shared.vault.getSecret(id: ProviderRole.bind.managedId(provider: provider.id))) == nil
+                    NSLog("provider-account: switched; managed=\(after.map(\.id)) bind=\(bindNow ?? "-") vaultSecretRemoved=\(gone)")
+                } catch {
+                    NSLog("provider-account: failed: \(describe(error))")
+                }
+            }
+        }
         if let index = args.firstIndex(of: "--set-folder-credential"), index + 1 < args.count {
             controller.setFolderCredential(args[index + 1])
         }
