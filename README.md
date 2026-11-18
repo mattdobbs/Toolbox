@@ -5,6 +5,14 @@ split panes and workspace tabs (the part Termius gets right), plus RDP and VNC
 with a credential vault, identities and 1Password sync (the part Royal TSX gets
 right). Swift for the app, Rust for the connection engine.
 
+## Download
+
+The latest signed and notarized build is on the
+[Releases page](https://github.com/mattdobbs/Toolbox/releases/latest):
+download the `.dmg`, open it and drag Toolbox to Applications. It needs a
+Mac with Apple silicon running macOS 14 or newer. The repository is
+private, so the link works for people who have been given access to it.
+
 ## Layout
 
 ```
@@ -81,6 +89,7 @@ make run       # build and launch
 make test      # Rust unit + integration tests (in-process SSH, SFTP and RDP servers)
 make signing   # one-time local code-signing identity
 make release   # Developer ID signed, notarized DMG for colleagues (see below)
+make publish   # put that DMG on the repo's Releases page
 make icon      # re-render the app icon
 make project   # App/project.yml → App/Toolbox.xcodeproj (XcodeGen)
 make xcode     # build with xcodebuild (after sudo xcodebuild -license accept)
@@ -133,7 +142,13 @@ Then, for each release:
 ```sh
 echo 0.3.0 > VERSION   # when the version should change
 make release           # several minutes: release build, sign, notarize twice, staple
+make publish           # GitHub Release v0.3.0 with the DMG, zip and checksums
 ```
+
+`make publish` refuses anything that is not notarized, tags the current
+commit (push it first) and writes the release notes: the standard install
+text plus the bullets in `docs/release-notes/<version>.md` if you add that
+file. `REPLACE=1 make publish` re-uploads an existing release's files.
 
 Once the Developer ID is in the keychain, plain `make app` signs with it
 as well (without the timestamp and hardened runtime that only releases

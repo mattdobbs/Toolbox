@@ -54,7 +54,8 @@ directly and do not create feature branches unless they ask. The old
   VaultManager, CredentialResolver, ProviderSync). `Sources/Generated/` and
   `Vendor/` are produced by `make core` and gitignored.
 - `bridge/` — build scripts: `build-core.sh`, `bundle-app.sh`,
-  `signing-identity.sh`, `release.sh` (`make release`), `make-icon.swift`.
+  `signing-identity.sh`, `release.sh` (`make release`), `publish.sh`
+  (`make publish`: GitHub Release with the notarized DMG), `make-icon.swift`.
   `VERSION` holds the marketing version; the build number is the commit
   count.
 - `tools/e2e/` — end-to-end harness (fixture, test servers, launch,
@@ -256,6 +257,16 @@ forwards, a Tasks concept like Royal's, terminal theme picker.
 ## Current state (update in every commit)
 
 As of 2026-11-18, on `main`.
+
+Published: the owner wants downloadable DMGs on the repo. `make publish`
+(bridge/publish.sh) uploads the notarized build as GitHub Release
+`v<version>`; v0.2.0 is live with the DMG, zip and SHA256SUMS, and README
+has a Download section. Release flow: bump `VERSION`, optionally add
+`docs/release-notes/<version>.md`, commit and push, `make release`,
+`make publish`. Notes are for teammates and carry no personal details.
+The repo is private, so downloads need repo access; history before
+1608b4c still contains the owner's AD domain and username, to be rewritten (their
+call) before giving anyone else access.
 
 Released: **Toolbox 0.2.0 (build 9)** was built with `make release` on the
 desktop Mac on 2026-11-18, signed with the owner's Developer ID Application
