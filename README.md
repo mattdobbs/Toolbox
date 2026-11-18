@@ -80,6 +80,7 @@ make app       # SwiftPM build wrapped into build/Toolbox.app (no Xcode license 
 make run       # build and launch
 make test      # Rust unit + integration tests (in-process SSH, SFTP and RDP servers)
 make signing   # one-time local code-signing identity
+make release   # Developer ID signed, notarized DMG for colleagues (see below)
 make icon      # re-render the app icon
 make project   # App/project.yml → App/Toolbox.xcodeproj (XcodeGen)
 make xcode     # build with xcodebuild (after sudo xcodebuild -license accept)
@@ -100,6 +101,47 @@ Application identity, an Apple Development identity, Toolbox Local Signing,
 then ad hoc (with a warning). To hand the app to coworkers, sign it with a
 Developer ID and notarize it; a self-signed build makes them right-click →
 Open the first time, and they answer the Keychain dialog once.
+
+## Sharing builds with the team
+
+`make release` produces `build/release/Toolbox-<version>.dmg` (and a .zip),
+signed with your Developer ID, notarized by Apple and stapled, so
+colleagues can open it with no Gatekeeper warning. The version comes from
+the `VERSION` file; the build number is the commit count.
+
+One-time setup on the Mac that makes releases:
+
+1. **Developer ID Application certificate.** In Xcode ▸ Settings ▸
+   Accounts, sign in with your developer account, select the team, then
+   Manage Certificates ▸ + ▸ Developer ID Application. Only the team's
+   Account Holder can create one (or an Admin the Account Holder has
+   allowed). To use it on a second Mac, export it with its private key from
+   Keychain Access as a .p12 and import it there.
+2. **Notarization credentials.** Create an app-specific password at
+   account.apple.com ▸ Sign-In and Security ▸ App-Specific Passwords, then:
+
+   ```sh
+   xcrun notarytool store-credentials toolbox-notary \
+     --apple-id you@example.com --team-id ABCDE12345
+   ```
+
+   The Team ID is shown in the certificate's name and at
+   developer.apple.com ▸ Membership.
+
+Then, for each release:
+
+```sh
+echo 0.3.0 > VERSION   # when the version should change
+make release           # several minutes: release build, sign, notarize twice, staple
+```
+
+`NOTARIZE=0 make release` skips notarization, and `ALLOW_ADHOC=1
+NOTARIZE=0 make release` rehearses the whole pipeline without a
+certificate (not shareable). Builds are Apple silicon only.
+
+Colleagues open the DMG and drag Toolbox to Applications. Their
+connections, vault and Keychain item are their own; nothing of yours ships
+in the app.
 
 The remaining prompt, Touch ID (or the login password) before the vault
 unlocks, is deliberate and can be turned off with Toolbox ▸ Require Touch ID
@@ -147,7 +189,9 @@ to Unlock Vault.
 
 - RDP through IronRDP: NLA logon, the desktop follows the pane size through
   Display Control (falling back to a reconnect at the new size), frames land
-  in an IOSurface-backed layer, full keyboard and mouse.
+  in an IOSurface-backed layer, full keyboard and mouse The requested
+  size is the pane's pixel size with the width rounded down to a multiple
+  of 4, which every server accepts.
 - VNC through RoyalVNCKit, the engine Royal TS itself ships.
 - File Transfer connections (Type ▸ File Transfer) over SFTP, FTP over TLS
   (explicit FTPS) or plain FTP, opening a file browser: navigate, upload,

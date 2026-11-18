@@ -54,7 +54,9 @@ directly and do not create feature branches unless they ask. The old
   VaultManager, CredentialResolver, ProviderSync). `Sources/Generated/` and
   `Vendor/` are produced by `make core` and gitignored.
 - `bridge/` — build scripts: `build-core.sh`, `bundle-app.sh`,
-  `signing-identity.sh`, `make-icon.swift`.
+  `signing-identity.sh`, `release.sh` (`make release`), `make-icon.swift`.
+  `VERSION` holds the marketing version; the build number is the commit
+  count.
 - `tools/e2e/` — end-to-end harness (fixture, test servers, launch,
   capture). `docs/SECURITY-REVIEW.md` — review findings and addenda.
 
@@ -73,7 +75,7 @@ The full dependency table is in README.md ("Dependencies"). In short:
    xcodegen` (`make xcode`, needs `sudo xcodebuild -license accept`),
    `cargo install cargo-audit`, `brew install gh`.
 4. `make core` then `make app` → `build/Toolbox.app`. `make test` → Rust
-   tests (40 as of 2026-11-16). `make run` launches the bundle.
+   tests (42 as of 2026-11-18). `make run` launches the bundle.
 5. `make signing` once (asks for the login password): creates and trusts a
    self-signed "Toolbox Local Signing" certificate so the app's signature
    stays stable across builds and the Keychain's "Always Allow" for the
@@ -142,8 +144,8 @@ as `Toolbox-*.ips` (JSON: header line, then body with `threads[].frames`).
 ## Conventions
 
 - Commit only when the owner asks, on `main`. Commit messages end with the
-  co-author line for the Claude model doing the work, e.g.
-  `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`; PR bodies with
+  co-author line the session's Claude Code harness specifies (currently
+  `Co-Authored-By: Claude <noreply@anthropic.com>`); PR bodies with
   `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
 - Before committing: scan the diff for keys/tokens, make sure no temporary
   probe code is left, run `make test`, and update **Current state** below.
@@ -175,6 +177,23 @@ as `Toolbox-*.ips` (JSON: header line, then body with `threads[].frames`).
 - Session end: `SshListener.on_closed(clean)` /
   `RdpListener.on_closed(reason, clean)`; a pane auto-closes 0.7 s after a
   clean end only. Failures keep the pane with the message.
+- Releases (`make release`) need a "Developer ID Application" identity and
+  a notarytool keychain profile `toolbox-notary`; README "Sharing builds
+  with the team" has the setup. Hardened runtime library validation needs
+  the app and `libRoyalVNCKit.dylib` to share a Team ID, which Developer ID
+  signing gives; ad-hoc rehearsals (`ALLOW_ADHOC=1 NOTARIZE=0`) add
+  `App/Signing/rehearsal.entitlements` (disable-library-validation) to get
+  past that, and real releases must never use it. No other entitlements are
+  needed (not sandboxed).
+- RDP desktop sizes go through `rdp_desktop_size` in the core (edges
+  200...8192, height even, width a multiple of 4). `RdpSession` applies it
+  on connect and resize, and `RdpSessionView.pixelSize()` calls the same
+  function so the size it wants equals the size it gets. A width that is
+  not a multiple of 4 makes the IronRDP test server (and some real
+  servers) fail to encode the bitmap and drop the connection; that was the
+  "connection lost" on Retina panes. Large frames arrive as several tiles,
+  not one full-screen region. To see server-side errors in a test, add
+  `tracing-subscriber` as a temporary dev-dependency and init it at DEBUG.
 - Keychain access is keyed on the code signature; ad-hoc signatures change
   per build (see `make signing`). `VaultManager` re-owns the vault-key item
   when the signing certificate changes.
@@ -218,31 +237,34 @@ forwards, a Tasks concept like Royal's, terminal theme picker.
 
 ## Current state (update in every commit)
 
-As of 2026-11-16, on `main`.
+As of 2026-11-18, on `main`.
 
-This change set: File Transfer connections (SFTP, FTP, explicit FTPS) with
-a Rust FTP client (`ftp.rs`, 3 integration tests against libunftp,
-including the untrusted-certificate prompt) reusing the file browser; AD
-provider accounts can each be an existing credential (grouped picker) or a
-username/password typed into the provider (provider-owned vault
-credential); credential pickers label untitled 1Password items by
-username; provider renames carry everything inside the folder. Verified
-end to end with the fixture: FTP and SFTP browsers listing, FTPS prompt,
-provider editor, FTPS connection editor, and the provider-account
-save/switch/cleanup lifecycle. 40 Rust tests, clippy clean, audit
-unchanged.
+This change set: release pipeline for sharing with the owner's team.
+`make release` (bridge/release.sh) builds release, signs with the
+Developer ID Application identity and the hardened runtime, notarizes the
+app and the DMG with notarytool, staples both, checks with spctl, and
+writes build/release/Toolbox-<version>.{dmg,zip} plus SHA256SUMS. Info.plist
+version now comes from `VERSION` (0.2.0) and the commit count. Rehearsed
+on the desktop Mac (no Developer ID installed there yet): the ad-hoc
+hardened build from the DMG ran SSH, SFTP, 1Password-resolved SSH, the
+vault and the FTPS prompt fine. The real signed and notarized run has
+**not** happened yet: the owner must create the certificate and the
+`toolbox-notary` profile first (both need their Apple login).
 
-Diagnosed 2026-11-16 (no code change): the owner's failing "corp-ad" AD providers
-fail because DC certificates are 1024-bit and their 1Password bind item
-has a stale password; the "CORP.EXAMPLE" provider works. Offered but not
-done: default "Fall back to unencrypted LDAP" to off, a key-size hint in
-the error, pinning CorpRootCA.
+Also fixed in this change set: RDP sessions dropped right after resizing
+on Retina displays ("Disconnected: connection lost"). Cause: the pane asked
+for a width that was not a multiple of 4 (2114), which the server could
+not encode. Sizes now go through `rdp_desktop_size`; a regression test
+connects at 642x481 and resizes to 2114x1588. The pane also keeps the
+specific error text when a session drops, and an abrupt close reads "the
+server closed the connection unexpectedly". Verified in the app at full
+width (2112x1588) and in a split (1052x1588). 42 Rust tests, clippy clean.
 
-Done earlier and verified: SSH, SFTP, RDP and VNC panes; vault with
-Keychain key + Touch ID; 1Password and AD providers; Royal-style sidebar
-tree; draggable pane layouts; tabbed workspaces with pane moves and tab
-rename; automatic pane close; connection auth methods with the username
-under the method; folder credentials; stable code signing path; pane-close
-crash fix.
+Done earlier and verified: SSH, SFTP/FTP/FTPS file transfer, RDP and VNC
+panes; vault with Keychain key + Touch ID; 1Password and AD providers (AD
+accounts as existing or typed-in credentials); Royal-style sidebar tree;
+draggable pane layouts; tabbed workspaces; automatic pane close;
+connection auth methods; folder credentials; stable code signing path.
 
-Pending: the owner still has to run `make signing` on each Mac.
+Pending: Developer ID certificate + notary profile, then a real
+`make release`; `make signing` on each Mac for day-to-day builds.

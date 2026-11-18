@@ -18,6 +18,8 @@ final class RdpSessionView: NSView, PaneContent {
     private var domain: String?
     private var pendingResize: DispatchWorkItem?
     private var lastRequestedSize: (Int, Int) = (0, 0)
+    /// The last error the session reported, shown when it then closes.
+    private var lastError: String?
     private var trackingArea: NSTrackingArea?
     private var modifierFlags: NSEvent.ModifierFlags = []
     private var terminated = false
@@ -154,15 +156,16 @@ final class RdpSessionView: NSView, PaneContent {
         return UInt32((scale * 100).rounded())
     }
 
-    /// The desktop size to ask for: this view's size in device pixels, even
-    /// numbers, within what RDP accepts.
+    /// The desktop size to ask for: this view's size in device pixels, as
+    /// the core will adjust it (within RDP's limits, width a multiple of 4).
+    /// Using the core's rule keeps "wanted" equal to what the session
+    /// actually requests, so a resize is never re-sent for a rounding gap.
     private func pixelSize() -> (Int, Int) {
         let scale = window?.backingScaleFactor ?? 2
-        var width = Int(bounds.width * scale)
-        var height = Int(bounds.height * scale)
-        width = min(max(width, 200), 8192) & ~1
-        height = min(max(height, 200), 8192) & ~1
-        return (width, height)
+        let width = UInt32(min(max(bounds.width * scale, 0), 16384))
+        let height = UInt32(min(max(bounds.height * scale, 0), 16384))
+        let size = rdpDesktopSize(width: width, height: height)
+        return (Int(size.width), Int(size.height))
     }
 
     private func scheduleResize() {
@@ -236,6 +239,7 @@ final class RdpSessionView: NSView, PaneContent {
     }
 
     func handleError(_ message: String) {
+        lastError = message
         setStatus(message)
     }
 
@@ -247,7 +251,8 @@ final class RdpSessionView: NSView, PaneContent {
             setStatus("Session ended: \(reason)")
             onSessionEnded?(true)
         } else {
-            setStatus("Disconnected: \(reason)")
+            // Keep the specific error on screen; the close reason is generic.
+            setStatus(lastError.map { "Disconnected: \($0)" } ?? "Disconnected: \(reason)")
             onSessionEnded?(false)
         }
     }

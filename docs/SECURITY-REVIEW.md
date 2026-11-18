@@ -187,3 +187,19 @@ quiet across rebuilds after that.
 - `cargo audit` unchanged by the new crates (suppaftp, async-native-tls;
   libunftp only under `test-support`).
 
+## Addendum — 2026-11-18: Developer ID releases
+
+- Releases are signed with the Developer ID Application certificate,
+  hardened runtime on, secure timestamp, notarized and stapled; the release
+  script refuses to finish if the hardened runtime flag is missing and
+  runs `spctl --assess` on the result.
+- No entitlements are granted to release builds. In particular library
+  validation stays on: only code signed by the same team (the bundled
+  RoyalVNCKit) can load into the process. The
+  `disable-library-validation` entitlement exists only for ad-hoc
+  rehearsals and is applied only when the identity is ad hoc.
+- Notarization credentials live in the login keychain (notarytool
+  profile), never in the repository or scripts.
+- Each colleague's data (store, vault, Keychain key) is created on their
+  own Mac; the app bundle carries no connections or secrets.
+

@@ -81,6 +81,26 @@ pub struct FrameSize {
     pub height: u16,
 }
 
+/// Smallest and largest desktop edge Display Control accepts (MS-RDPEDISP).
+const MIN_DESKTOP_EDGE: u32 = 200;
+const MAX_DESKTOP_EDGE: u32 = 8192;
+
+/// The desktop size to request for a wanted size in pixels. Each edge is
+/// kept within what Display Control accepts, the height is made even, and
+/// the width is rounded down to a multiple of 4: RDP bitmap rows are padded
+/// to 4-pixel boundaries and some servers drop the connection when asked
+/// for anything else. Sessions apply this themselves; the app calls it to
+/// know which size it will get.
+#[uniffi::export]
+pub fn rdp_desktop_size(width: u32, height: u32) -> FrameSize {
+    let width = width.clamp(MIN_DESKTOP_EDGE, MAX_DESKTOP_EDGE) & !3;
+    let height = height.clamp(MIN_DESKTOP_EDGE, MAX_DESKTOP_EDGE) & !1;
+    FrameSize {
+        width: width as u16,
+        height: height as u16,
+    }
+}
+
 /// Implemented on the Swift side; invoked from core threads.
 #[uniffi::export(callback_interface)]
 pub trait RdpListener: Send + Sync {
@@ -112,7 +132,10 @@ pub struct RdpSession {
 impl RdpSession {
     /// Starts connecting immediately and returns. Progress arrives on `listener`.
     #[uniffi::constructor]
-    pub fn connect(config: RdpConfig, listener: Box<dyn RdpListener>) -> Arc<Self> {
+    pub fn connect(mut config: RdpConfig, listener: Box<dyn RdpListener>) -> Arc<Self> {
+        let size = rdp_desktop_size(config.width.into(), config.height.into());
+        config.width = size.width;
+        config.height = size.height;
         let (tx, rx) = mpsc::unbounded_channel();
         let image: SharedImage = Arc::new(Mutex::new(None));
         let closed = Arc::new(AtomicBool::new(false));
@@ -214,9 +237,14 @@ impl RdpSession {
         }
     }
 
-    /// Asks the server for a new desktop size.
+    /// Asks the server for a new desktop size (adjusted by `rdp_desktop_size`).
     pub fn resize(&self, width: u16, height: u16, scale_factor: u32) {
-        let _ = self.tx.send(Cmd::Resize { width, height, scale_factor });
+        let size = rdp_desktop_size(width.into(), height.into());
+        let _ = self.tx.send(Cmd::Resize {
+            width: size.width,
+            height: size.height,
+            scale_factor,
+        });
     }
 
     pub fn close(&self) {
@@ -446,6 +474,9 @@ where
         };
 
         let outputs = match event {
+            Event::Frame(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Err(CoreError::Connect("the server closed the connection unexpectedly".into()));
+            }
             Event::Frame(Err(e)) => return Err(CoreError::Connect(format!("connection lost: {e}"))),
             Event::Frame(Ok((action, payload))) => {
                 let mut guard = lock_or_recover(image);
@@ -575,3 +606,30 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_sizes_are_made_acceptable() {
+        let size = |w, h| {
+            let s = rdp_desktop_size(w, h);
+            (s.width, s.height)
+        };
+        // Already fine.
+        assert_eq!(size(1280, 800), (1280, 800));
+        // A Retina pane: width down to a multiple of 4, height stays even.
+        assert_eq!(size(2114, 1588), (2112, 1588));
+        assert_eq!(size(2115, 1589), (2112, 1588));
+        assert_eq!(size(1283, 801), (1280, 800));
+        // Limits from MS-RDPEDISP.
+        assert_eq!(size(0, 0), (200, 200));
+        assert_eq!(size(50, 199), (200, 200));
+        assert_eq!(size(20_000, 9_001), (8192, 8192));
+        for w in 200..260 {
+            assert_eq!(rdp_desktop_size(w, 300).width % 4, 0);
+        }
+    }
+}
+

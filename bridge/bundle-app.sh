@@ -46,6 +46,16 @@ case "$SIGN_NAME" in
   *"Developer ID Application"*) SIGN_FLAGS+=(--timestamp --options runtime) ;;  # what notarization needs
   *) SIGN_FLAGS+=(--timestamp=none) ;;
 esac
+# TOOLBOX_HARDENED=1 turns the hardened runtime on for any identity, so a
+# release-like bundle can be tried without the Developer ID certificate.
+if [[ "${TOOLBOX_HARDENED:-0}" == "1" && "$SIGN_NAME" != *"Developer ID Application"* ]]; then
+  SIGN_FLAGS+=(--options runtime)
+fi
+
+# Versions: TOOLBOX_VERSION (default from the VERSION file) and a build
+# number that always increases (commit count), so updates sort correctly.
+VERSION="${TOOLBOX_VERSION:-$(tr -d '[:space:]' < "$ROOT/VERSION" 2>/dev/null || echo 0.1.0)}"
+BUILD_NUMBER="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)"
 
 cd "$ROOT/App"
 swift build -c "$CONFIG" --product Toolbox "${SWIFT_FLAGS[@]}"
@@ -81,8 +91,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleDisplayName</key><string>Toolbox</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
@@ -92,7 +102,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign "${SIGN_FLAGS[@]}" "$APP" >/dev/null
+APP_SIGN_FLAGS=("${SIGN_FLAGS[@]}")
+if [[ "${TOOLBOX_HARDENED:-0}" == "1" && "$SIGN_ID" == "-" ]]; then
+  APP_SIGN_FLAGS+=(--entitlements "$ROOT/App/Signing/rehearsal.entitlements")
+fi
+codesign "${APP_SIGN_FLAGS[@]}" "$APP" >/dev/null
 if [[ "$SIGN_ID" == "-" ]]; then
   echo "warning: signed ad hoc; the Keychain will ask about the vault key again after every rebuild." >&2
   echo "         Run 'make signing' once to give the app a stable identity." >&2

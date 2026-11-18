@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Only for ALLOW_ADHOC release rehearsals: an ad-hoc signature has no Team
+     ID, so the hardened runtime's library validation would refuse the
+     bundled RoyalVNCKit dylib. Real Developer ID builds never use this; the
+     app and the dylib share the Team ID there. -->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.disable-library-validation</key><true/>
+</dict>
+</plist>

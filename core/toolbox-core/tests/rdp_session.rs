@@ -115,6 +115,55 @@ fn connects_renders_inputs_and_resizes() {
     assert!(seen.errors.lock().unwrap().is_empty(), "{:?}", seen.errors.lock().unwrap());
 }
 
+/// A pane on a Retina display asks for a desktop several times larger than
+/// the one it connected at; the session has to survive that.
+#[test]
+fn resizes_to_a_large_retina_desktop() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let server = rt.block_on(rdp_test_server::start(TestServerConfig::default())).unwrap();
+
+    // Sizes straight from a pane: neither width is a multiple of 4, which
+    // this server (like some real ones) refuses to encode.
+    let seen = Arc::new(Seen::default());
+    let mut cfg = config(server.addr, "secret");
+    cfg.width = 642;
+    cfg.height = 481;
+    let session = RdpSession::connect(cfg, Box::new(Recorder(seen.clone())));
+    wait_until("connect", 20, || seen.connected.lock().unwrap().is_some());
+    assert_eq!(*seen.connected.lock().unwrap(), Some((640, 480)));
+
+    session.resize(2114, 1588, 200);
+    wait_until("resize or failure", 20, || {
+        *seen.resized.lock().unwrap() == Some((2112, 1588)) || seen.closed.load(SeqCst)
+    });
+    assert!(
+        !seen.closed.load(SeqCst),
+        "session closed: {:?} errors {:?}",
+        seen.close_reason.lock().unwrap(),
+        seen.errors.lock().unwrap()
+    );
+    // A frame this large arrives as several tiles; wait until both corners
+    // of the new desktop carry the fill colour.
+    let fill = vec![0x40, 0x80, 0x20, 0xFF];
+    wait_until("frame after resize", 15, || {
+        seen.closed.load(SeqCst)
+            || (session.copy_region(10, 10, 1, 1) == fill && session.copy_region(2110, 1586, 1, 1) == fill)
+    });
+    assert!(
+        !seen.closed.load(SeqCst),
+        "session closed after resize: {:?} errors {:?}",
+        seen.close_reason.lock().unwrap(),
+        seen.errors.lock().unwrap()
+    );
+    assert_eq!(session.frame_size().width, 2112);
+    assert_eq!(server.observed.lock().unwrap().layouts.last(), Some(&(2112, 1588)));
+    assert!(seen.regions.lock().unwrap().len() > 1, "expected the frame in tiles");
+    session.close();
+    wait_until("close", 10, || seen.closed.load(SeqCst));
+    assert!(seen.clean.load(SeqCst));
+    assert!(seen.errors.lock().unwrap().is_empty(), "{:?}", seen.errors.lock().unwrap());
+}
+
 #[test]
 fn wrong_password_is_reported() {
     let rt = tokio::runtime::Runtime::new().unwrap();
