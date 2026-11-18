@@ -178,7 +178,7 @@ quiet across rebuilds after that.
   encryption and Touch ID gate), removed with their secret when the
   provider stops using them or is deleted.
 - **Active Directory finding**: every domain controller behind
-  dc01.corp.example presents a 1024-bit RSA certificate, which macOS
+  the AD domain used for testing presents a 1024-bit RSA certificate, which macOS
   refuses. Verified LDAPS is impossible until those are reissued; the
   "Accept untrusted certificates" option keeps the bind encrypted but
   unauthenticated, which is still far better than the plain-LDAP fallback
@@ -202,4 +202,10 @@ quiet across rebuilds after that.
   profile), never in the repository or scripts.
 - Each colleague's data (store, vault, Keychain key) is created on their
   own Mac; the app bundle carries no connections or secrets.
+- First release (0.2.0, 2026-11-18): signed with the owner's Developer ID,
+  notarized and stapled; a quarantined copy of the DMG is
+  accepted by Gatekeeper as "Notarized Developer ID" and carries no
+  entitlements. The Developer ID private key exists only in the release
+  Mac's login keychain and is not exportable from the repository's point
+  of view: nothing about it is stored in git.
 

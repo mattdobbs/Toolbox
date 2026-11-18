@@ -149,6 +149,10 @@ as `Toolbox-*.ips` (JSON: header line, then body with `threads[].frames`).
   `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
 - Before committing: scan the diff for keys/tokens, make sure no temporary
   probe code is left, run `make test`, and update **Current state** below.
+  The owner's own configuration never goes in git: no real hostnames, domain
+  names, usernames, account emails, Team IDs or anything from
+  `~/Library/Application Support/Toolbox/`. Use `corp.example`, `CORP\jdoe`
+  and placeholders in docs, tests and fixtures.
   Never commit `build/`, `core/target/`, `App/.build/`, generated bindings
   or `App/Vendor/` (all gitignored); binaries are not shared through git.
 - Keep `README.md` "What works" and `docs/SECURITY-REVIEW.md` (an addendum
@@ -179,7 +183,21 @@ as `Toolbox-*.ips` (JSON: header line, then body with `threads[].frames`).
   clean end only. Failures keep the pane with the message.
 - Releases (`make release`) need a "Developer ID Application" identity and
   a notarytool keychain profile `toolbox-notary`; README "Sharing builds
-  with the team" has the setup. Hardened runtime library validation needs
+  with the team" has the setup. The Team ID is the code in parentheses in
+  `security find-identity -v -p codesigning`; keep it, names and account
+  emails out of the repo. On the desktop Mac both exist since 2026-11-18; the private
+  key lives only in that Mac's login keychain (export a .p12 to release
+  from the laptop). Lessons from the first real run: Xcode refused to
+  create the certificate for the account holder, so it was made on
+  developer.apple.com from a Keychain Access CSR; Apple's intermediates
+  (DeveloperIDG2CA, AppleWWDRCAG3 from apple.com/certificateauthority) had
+  to be imported before `security find-identity -v` listed the identity;
+  notarization rejects signatures without a secure timestamp
+  (`--timestamp`, only added when `TOOLBOX_HARDENED=1`); and never pipe
+  into `grep -q` under `set -o pipefail` in these scripts, capture first.
+  `make app` signs with the Developer ID too (no timestamp, no hardened
+  runtime), which gives every build the same Keychain identity, so
+  `make signing` is unnecessary on a Mac that has the Developer ID. Hardened runtime library validation needs
   the app and `libRoyalVNCKit.dylib` to share a Team ID, which Developer ID
   signing gives; ad-hoc rehearsals (`ALLOW_ADHOC=1 NOTARIZE=0`) add
   `App/Signing/rehearsal.entitlements` (disable-library-validation) to get
@@ -217,7 +235,7 @@ as `Toolbox-*.ips` (JSON: header line, then body with `threads[].frames`).
   `provider-account`. `AppModel.saveProvider(draft)` writes them before
   the provider and deletes ones no longer used; deleting the provider
   deletes them. Renaming a provider moves everything inside its folder.
-- Every DC behind dc01.corp.example presents a 1024-bit RSA LDAPS
+- Every DC in the AD domain used for testing presents a 1024-bit RSA LDAPS
   certificate (checked 2026-11-16); macOS refuses those, so verified LDAPS
   cannot work there until they are reissued. The working provider
   uses "Accept untrusted certificates".
@@ -239,17 +257,17 @@ forwards, a Tasks concept like Royal's, terminal theme picker.
 
 As of 2026-11-18, on `main`.
 
-This change set: release pipeline for sharing with the owner's team.
-`make release` (bridge/release.sh) builds release, signs with the
-Developer ID Application identity and the hardened runtime, notarizes the
-app and the DMG with notarytool, staples both, checks with spctl, and
-writes build/release/Toolbox-<version>.{dmg,zip} plus SHA256SUMS. Info.plist
-version now comes from `VERSION` (0.2.0) and the commit count. Rehearsed
-on the desktop Mac (no Developer ID installed there yet): the ad-hoc
-hardened build from the DMG ran SSH, SFTP, 1Password-resolved SSH, the
-vault and the FTPS prompt fine. The real signed and notarized run has
-**not** happened yet: the owner must create the certificate and the
-`toolbox-notary` profile first (both need their Apple login).
+Released: **Toolbox 0.2.0 (build 9)** was built with `make release` on the
+desktop Mac on 2026-11-18, signed with the owner's Developer ID Application
+identity, notarized (app and DMG both Accepted) and stapled. Checked
+as a recipient would get it: a quarantined copy of the DMG passes
+`spctl` ("Notarized Developer ID"), and the app run from it handled SSH,
+RDP, SFTP and the vault. Artifacts are in build/release/ on that Mac (not
+in git). This change set fixes what the first real run exposed in the
+scripts: an identity passed by SHA-1 now resolves to its name so the
+Developer ID options apply, the release checks for secure timestamps
+before contacting Apple, and everyday builds use the Developer ID without
+timestamp or hardened runtime.
 
 Also fixed in this change set: RDP sessions dropped right after resizing
 on Retina displays ("Disconnected: connection lost"). Cause: the pane asked
@@ -266,5 +284,6 @@ accounts as existing or typed-in credentials); Royal-style sidebar tree;
 draggable pane layouts; tabbed workspaces; automatic pane close;
 connection auth methods; folder credentials; stable code signing path.
 
-Pending: Developer ID certificate + notary profile, then a real
-`make release`; `make signing` on each Mac for day-to-day builds.
+Pending: nothing for the desktop Mac. The laptop needs the Developer ID
+identity (.p12 export/import) only if releases should be made there;
+otherwise `make signing` gives its everyday builds a stable identity.

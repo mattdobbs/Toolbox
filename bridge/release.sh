@@ -73,6 +73,17 @@ codesign --verify --deep --strict --verbose=2 "$APP"
 SIGNATURE="$(codesign -dvv "$APP" 2>&1)"
 grep -E "^(Authority|TeamIdentifier|CodeDirectory)" <<<"$SIGNATURE" || true
 [[ "$SIGNATURE" == *"runtime"* ]] || fail "the app is not signed with the hardened runtime"
+if [[ "$TOOLBOX_SIGN_IDENTITY" != "-" ]]; then
+  # Apple refuses to notarize signatures without a secure timestamp; catch
+  # that here instead of after a round trip to the notary service.
+  while IFS= read -r -d '' item; do
+    # Capture first: piping into `grep -q` trips pipefail when grep exits early.
+    details="$(codesign -dvv "$item" 2>&1 || true)"
+    [[ "$details" == *$'\n'"Timestamp="* ]] \
+      || fail "no secure timestamp in the signature of ${item#"$APP"/}"
+  done < <(find "$APP/Contents/MacOS" "$APP/Contents/Frameworks" -type f -print0)
+  echo "secure timestamps: present"
+fi
 
 notarize() { # $1 = file to submit
   step "Notarizing $(basename "$1") (usually a few minutes)"

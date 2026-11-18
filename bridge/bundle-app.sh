@@ -23,12 +23,19 @@ fi
 #   otherwise the first of: Developer ID Application, Apple Development,
 #   Toolbox Local Signing (from `make signing`); ad hoc as a last resort.
 pick_identity() {
-  if [[ -n "${TOOLBOX_SIGN_IDENTITY:-}" ]]; then
-    printf '%s\t%s\n' "$TOOLBOX_SIGN_IDENTITY" "$TOOLBOX_SIGN_IDENTITY"
-    return
-  fi
   local identities pattern line
   identities="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+  if [[ -n "${TOOLBOX_SIGN_IDENTITY:-}" ]]; then
+    # An explicit choice may be a SHA-1 or a name; look up its full name so
+    # the Developer ID options below (timestamp, hardened runtime) apply.
+    line="$(printf '%s\n' "$identities" | grep -F "$TOOLBOX_SIGN_IDENTITY" | head -1 || true)"
+    if [[ -n "$line" ]]; then
+      printf '%s\t%s\n' "$TOOLBOX_SIGN_IDENTITY" "$(sed -E 's/^[^"]*"(.*)"[^"]*$/\1/' <<<"$line")"
+    else
+      printf '%s\t%s\n' "$TOOLBOX_SIGN_IDENTITY" "$TOOLBOX_SIGN_IDENTITY"
+    fi
+    return
+  fi
   for pattern in "Developer ID Application:" "Apple Development:" "Toolbox Local Signing"; do
     line="$(printf '%s\n' "$identities" | grep -F "$pattern" | head -1 || true)"
     if [[ -n "$line" ]]; then
@@ -41,16 +48,20 @@ pick_identity() {
 }
 IFS=$'\t' read -r SIGN_ID SIGN_NAME < <(pick_identity)
 SIGN_FLAGS=(--force --sign "$SIGN_ID")
-case "$SIGN_NAME" in
-  ad-hoc) ;;
-  *"Developer ID Application"*) SIGN_FLAGS+=(--timestamp --options runtime) ;;  # what notarization needs
-  *) SIGN_FLAGS+=(--timestamp=none) ;;
-esac
-# TOOLBOX_HARDENED=1 turns the hardened runtime on for any identity, so a
-# release-like bundle can be tried without the Developer ID certificate.
-if [[ "${TOOLBOX_HARDENED:-0}" == "1" && "$SIGN_NAME" != *"Developer ID Application"* ]]; then
+# TOOLBOX_HARDENED=1 (set by `make release`) asks for what notarization
+# needs: the hardened runtime, plus Apple's secure timestamp when signing
+# with a Developer ID. Everyday builds skip both: they then need no network
+# and stay debuggable, while keeping the same identity, so the Keychain's
+# "Always Allow" covers development and release builds alike.
+if [[ "${TOOLBOX_HARDENED:-0}" == "1" ]]; then
   SIGN_FLAGS+=(--options runtime)
 fi
+case "$SIGN_NAME" in
+  ad-hoc) ;;
+  *"Developer ID Application"*)
+    if [[ "${TOOLBOX_HARDENED:-0}" == "1" ]]; then SIGN_FLAGS+=(--timestamp); else SIGN_FLAGS+=(--timestamp=none); fi ;;
+  *) SIGN_FLAGS+=(--timestamp=none) ;;
+esac
 
 # Versions: TOOLBOX_VERSION (default from the VERSION file) and a build
 # number that always increases (commit count), so updates sort correctly.

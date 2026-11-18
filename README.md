@@ -135,6 +135,16 @@ echo 0.3.0 > VERSION   # when the version should change
 make release           # several minutes: release build, sign, notarize twice, staple
 ```
 
+Once the Developer ID is in the keychain, plain `make app` signs with it
+as well (without the timestamp and hardened runtime that only releases
+need), so every build has the same identity and `make signing` is not
+needed on that Mac. If Xcode refuses to create the certificate, make it at
+developer.apple.com ▸ Certificates ▸ + ▸ Developer ID Application from a
+request file created in Keychain Access ▸ Certificate Assistant, and
+install Apple's intermediate certificates (DeveloperIDG2CA from
+apple.com/certificateauthority) if `security find-identity -v` does not
+list it.
+
 `NOTARIZE=0 make release` skips notarization, and `ALLOW_ADHOC=1
 NOTARIZE=0 make release` rehearses the whole pipeline without a
 certificate (not shareable). Builds are Apple silicon only.
