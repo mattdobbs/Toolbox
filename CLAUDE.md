@@ -153,7 +153,9 @@ as `Toolbox-*.ips` (JSON: header line, then body with `threads[].frames`).
   The owner's own configuration never goes in git: no real hostnames, domain
   names, usernames, account emails, Team IDs or anything from
   `~/Library/Application Support/Toolbox/`. Use `corp.example`, `CORP\jdoe`
-  and placeholders in docs, tests and fixtures.
+  and placeholders in docs, tests and fixtures. The same goes for anything
+  else personal: no names, no employer, and no personal email address in
+  commit metadata. Write "the owner" in these notes.
   Never commit `build/`, `core/target/`, `App/.build/`, generated bindings
   or `App/Vendor/` (all gitignored); binaries are not shared through git.
 - Keep `README.md` "What works" and `docs/SECURITY-REVIEW.md` (an addendum
@@ -256,7 +258,16 @@ forwards, a Tasks concept like Royal's, terminal theme picker.
 
 ## Current state (update in every commit)
 
-As of 2026-11-18, on `main`.
+As of 2026-11-19, on `main`.
+
+History rewritten on 2026-11-19. The repo is public, and it was rebuilt so
+that no commit carries a personal email address, a name, or details of a
+real network. **Every commit ID changed, and the GitHub repository itself
+is a new one.** A clone made before that date still holds the old commits:
+do not pull into it, push from it or merge it. Delete it and clone again.
+In every clone, set `git config user.email` to the account's GitHub
+no-reply address before the first commit. Along the way the test servers'
+login became `demo` / `secret`, and the sample folders `ACME/...`.
 
 Published: the owner wants downloadable DMGs on the repo. `make publish`
 (bridge/publish.sh) uploads the notarized build as GitHub Release
@@ -264,9 +275,7 @@ Published: the owner wants downloadable DMGs on the repo. `make publish`
 has a Download section. Release flow: bump `VERSION`, optionally add
 `docs/release-notes/<version>.md`, commit and push, `make release`,
 `make publish`. Notes are for teammates and carry no personal details.
-The repo is private, so downloads need repo access; history before
-1608b4c still contains the owner's AD domain and username, to be rewritten (their
-call) before giving anyone else access.
+The repo is public, so anyone can read the code and download a release.
 
 Released: **Toolbox 0.2.0 (build 9)** was built with `make release` on the
 desktop Mac on 2026-11-18, signed with the owner's Developer ID Application
@@ -295,6 +304,7 @@ accounts as existing or typed-in credentials); Royal-style sidebar tree;
 draggable pane layouts; tabbed workspaces; automatic pane close;
 connection auth methods; folder credentials; stable code signing path.
 
-Pending: nothing for the desktop Mac. The laptop needs the Developer ID
-identity (.p12 export/import) only if releases should be made there;
-otherwise `make signing` gives its everyday builds a stable identity.
+Pending: nothing for the desktop Mac. The laptop has had a Developer ID
+identity of its own since 2026-11-19 (a second certificate for the same
+team, made for another project), so `make app` there now signs with it.
+Making a release on the laptop still needs the `toolbox-notary` profile.
