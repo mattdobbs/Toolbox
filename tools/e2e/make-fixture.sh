@@ -19,13 +19,31 @@ printf '[127.0.0.1]:2222 %s\n' "$(cut -d' ' -f1,2 "$DIR/host_key.pub")" > "$DIR/
 
 # Fake 1Password CLI: enough of `op item list` / `op item get` for the
 # provider sync and credential resolution. Calls are logged to op.log.
+# Besides the two items the connections use, the vault holds a few dozen
+# made-up logins, so pickers have something to search through.
+{
+  echo '[{"id":"i1","title":"Echo login","vault":{"id":"v","name":"work"},"category":"LOGIN","additional_information":"demo"},'
+  echo ' {"id":"i2","title":"Lab SSH key","vault":{"id":"v","name":"work"},"category":"SSH_KEY"}'
+  n=10
+  for site in atl dfw sea; do
+    for role in db web app cache backup; do
+      for env in prod stage; do
+        for user in admin deploy; do
+          n=$((n + 1))
+          printf ' ,{"id":"g%d","title":"%s-%s-%s %s","vault":{"id":"v","name":"work"},"category":"LOGIN","additional_information":"svc_%s_%s"}\n' \
+            "$n" "$role" "$env" "$site" "$user" "$role" "$user"
+        done
+      done
+    done
+  done
+  echo ']'
+} > "$DIR/op-items.json"
 cat > "$DIR/op" <<'FAKEOP'
 #!/bin/sh
 echo "$@" >> "$(dirname "$0")/op.log"
 case "$1 $2" in
   "item list")
-    echo '[{"id":"i1","title":"Echo login","vault":{"id":"v","name":"work"},"category":"LOGIN","additional_information":"demo"},
-           {"id":"i2","title":"Lab SSH key","vault":{"id":"v","name":"work"},"category":"SSH_KEY"}]' ;;
+    cat "$(dirname "$0")/op-items.json" ;;
   "item get")
     echo '{"id":"i1","fields":[{"id":"username","purpose":"USERNAME","value":"demo"},{"id":"password","purpose":"PASSWORD","value":"secret"}]}' ;;
   *) echo "[ERROR] unexpected arguments: $*" >&2; exit 1 ;;

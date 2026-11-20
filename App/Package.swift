@@ -34,6 +34,12 @@ let package = Package(
                 .linkedFramework("Security"),
                 .linkedFramework("SystemConfiguration"),
                 .linkedFramework("CoreFoundation"),
+                // The core's remote desktop frames (IOSurface) and H.264
+                // decoding (VideoToolbox).
+                .linkedFramework("IOSurface"),
+                .linkedFramework("CoreMedia"),
+                .linkedFramework("CoreVideo"),
+                .linkedFramework("VideoToolbox"),
             ]
         ),
     ]

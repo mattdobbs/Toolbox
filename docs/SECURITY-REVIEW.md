@@ -209,3 +209,107 @@ quiet across rebuilds after that.
   Mac's login keychain and is not exportable from the repository's point
   of view: nothing about it is stored in git.
 
+
+## Addendum — 2026-11-20: RDP clipboard sharing and the graphics pipeline
+
+Reviewed: everything new in 0.3.0. The clipboard channel (CLIPRDR), the
+graphics pipeline with H.264 through VideoToolbox, the surface the core
+paints into, the searchable credential picker, and the new testing aids.
+The adversary in mind is a hostile or compromised RDP host. Method: a
+read-through of the whole change set, tests for the properties claimed
+below, `cargo clippy`, `cargo audit`.
+
+Result: nothing was found that lets a host reach beyond what the feature
+hands it. Three things were changed because of the review (marked
+"review" below). What remains is the risk that comes with sharing a
+clipboard at all; it is spelled out so it can be weighed.
+
+**What a remote desktop can read from the Mac.** With View ▸ Remote
+Desktop ▸ Share Clipboard on (the default), a session is told what the
+Mac's clipboard holds only while its pane has the keyboard (key window of
+the active app, first responder). Sessions in the background are told
+nothing.
+
+- *Text.* The announcement carries no content. The text is handed over
+  when the host asks for it, and only while the clipboard still holds what
+  was announced: something copied later in another app was never offered,
+  and a request for it is refused. A host does not have to wait for the
+  user to paste, though; it can ask the moment it is told. **Anything on
+  the clipboard when you click into a remote desktop, and anything you
+  copy while working in one, is readable by that host**, passwords copied
+  from a password manager included. That is how every RDP client's
+  clipboard works; Toolbox narrows it to the session in front.
+- *Files.* When files or folders are on the clipboard the session
+  announces a list of names and sizes. The host then asks for byte ranges
+  by position in that list. It never supplies a path, so it cannot name a
+  file that was not copied. Folders are walked without following links out
+  of them; a copied link means its target. Names are rewritten to be
+  plain Windows file names (no separators, no `..`, no device names), so a
+  Mac file name cannot be read as a path on the other side, and no path on
+  the Mac is sent. Limits: 5,000 entries and 32 levels per copy, 16 MiB
+  per range, 8 ranges at a time. As with text, the host can read the
+  offered files without anyone pasting.
+- *Review:* a file is served only while its path still resolves to
+  itself. If a link is put in the file's place, or in a folder above it,
+  after the list was built, the request is refused. This matters for
+  folders other people can write to, such as a network share.
+- A host may lock a file list so a paste in progress survives the next
+  copy. A locked list that is no longer on the clipboard is forgotten
+  after 60 seconds without a read.
+- macOS may ask once whether Toolbox may read Desktop, Documents or
+  Downloads when a file from there is first offered. The purpose text
+  says why.
+
+**What a remote desktop can do to the Mac.** It can put text on the
+Mac's clipboard while its pane has the keyboard, or the next time it has,
+provided the Mac's clipboard did not change in between. Text only, at
+most 32 MiB; nothing is written to disk or run. The residual risk is
+paste-jacking: a compromised host can swap the clipboard just before you
+paste somewhere else. Files and pictures from the host are not accepted.
+
+**Protocol input.**
+- *Review:* one message on the clipboard channel is limited to 64 MiB.
+  IronRDP's default has no limit, and a host could have made the session
+  buffer gigabytes.
+- Graphics pipeline data is decoded by IronRDP in Rust (ClearCodec,
+  RemoteFX Progressive, planar). H.264 goes to the system's VideoToolbox;
+  no decoder library is bundled. The wrapper checks the geometry of every
+  decoded picture before reading it, and tests feed it truncated and
+  corrupted streams. A picture that fails to decode is dropped and the
+  session carries on.
+- *Review (found by a test):* the session advertised every bitmap codec
+  IronRDP knew, including ones it was not built to decode. It now
+  advertises RemoteFX only.
+- The desktop lives in an IOSurface found by ID inside the app. Such
+  surfaces are not global, so another process cannot look one up.
+- Clipboard text is never logged, and the types that carry it are not
+  printable.
+
+**Unchanged, and worth knowing now that more flows over a session.** RDP
+still accepts any server certificate. Network Level Authentication is
+always required and ties the logon to the server's TLS key, so someone in
+the middle who does not know the account's password cannot complete the
+logon. Certificate checking per connection stays on the list.
+
+**Testing aids.** `--assume-keyboard` drops the keyboard condition for
+clipboard announcements and `--snapshot <dir>` writes pictures of the
+app's windows. Both exist only as launch arguments, for checks that have
+to run with the screen locked.
+
+**Releases.** The binary of 0.2.0 contained about 1,100 source paths
+under the build Mac's home folder. Release builds now rewrite them, and
+`make release` stops if any are left in the app or its bundled library.
+
+**Dependencies.** No new third-party crate ships: `ironrdp-cliprdr` and
+`ironrdp-egfx` come from the IronRDP revision already pinned, and nothing
+in C or C++ was added. `cargo audit` reports what it did before this
+change set: the `rsa` advisory, the unmaintained crates, and a group of
+"unsound" advisories for `heapless` published on 2026-11-18, reached
+through the smart-card support of IronRDP's `sspi`, which Toolbox does
+not use.
+
+**Not verified.** None of this has run against a real Windows host yet.
+The properties above are tested against the in-process IronRDP server
+(67 Rust tests) and in the app against the local test server. If a host
+misbehaves with the newer graphics, View ▸ Remote Desktop ▸ Fast Graphics
+switches them off.

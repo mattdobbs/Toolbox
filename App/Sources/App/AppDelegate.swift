@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     var workspaces: [WorkspaceWindowController] { controllers }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        RdpPreferences.registerDefaults()
         MainMenu.install()
         _ = AppModel.shared
         // Double-clicking a workspace tab renames it. The first click of the
@@ -60,6 +61,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         VaultManager.shared.requiresAuthentication.toggle()
     }
 
+    /// The View ▸ Remote Desktop switches; each item carries its
+    /// `RdpPreferences` key.
+    @objc func toggleRemoteDesktopPreference(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        RdpPreferences.toggle(key)
+    }
+
     /// `Toolbox --connect <name or id>` opens that connection on launch;
     /// `--files <name or id>` opens its SFTP browser.
     private func openConnectionFromArguments(in controller: WorkspaceWindowController) {
@@ -78,6 +86,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                 continue
             }
             action(connection)
+        }
+        // Testing aid: save pictures of the app's windows, drawn by the app
+        // itself, a few seconds after launch (`--snapshot-after <secs>`).
+        if let index = args.firstIndex(of: "--snapshot"), index + 1 < args.count {
+            let directory = URL(fileURLWithPath: args[index + 1], isDirectory: true)
+            let delay = args.firstIndex(of: "--snapshot-after").flatMap { $0 + 1 < args.count ? Double(args[$0 + 1]) : nil } ?? 6
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                Snapshot.write(to: directory)
+            }
+        }
+        // Testing aid: split the focused pane shortly after launch, which
+        // resizes what is in it.
+        if args.contains("--demo-split") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                controller.splitRight(nil)
+            }
         }
         // Testing aid: move the focused pane into a fresh workspace tab.
         if args.contains("--demo-move") {
@@ -247,6 +271,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         }
         if menuItem.action == #selector(toggleVaultAuthentication(_:)) {
             menuItem.state = VaultManager.shared.requiresAuthentication ? .on : .off
+        }
+        if menuItem.action == #selector(toggleRemoteDesktopPreference(_:)), let key = menuItem.representedObject as? String {
+            menuItem.state = UserDefaults.standard.bool(forKey: key) ? .on : .off
         }
         return true
     }

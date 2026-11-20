@@ -18,6 +18,7 @@
 #   NOTARY_PROFILE=other make release # different keychain profile
 #   TOOLBOX_SIGN_IDENTITY=<sha1|name> # pick among several Developer IDs
 #   ALLOW_ADHOC=1 NOTARIZE=0          # rehearse the pipeline without a certificate
+#   ALLOW_BUILD_PATHS=1               # keep going if the binary names this Mac (never for a published build)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -67,6 +68,25 @@ BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info
 NAME="Toolbox-$VERSION"
 OUT="$ROOT/build/release"
 rm -rf "$OUT"; mkdir -p "$OUT"
+
+# The download is public. Nothing in it may name the Mac it was built on:
+# both build scripts rewrite source paths for release builds, and this
+# makes sure nothing slipped through (a new dependency, a new tool).
+step "Checking for paths from this Mac"
+LEAKS=0
+while IFS= read -r -d '' item; do
+  # Capture first, as below: `grep -q` in a pipeline trips pipefail.
+  found="$(strings -a "$item" | grep -c -F -e "$HOME" -e "/Users/$(id -un)" || true)"
+  if [[ "$found" != "0" ]]; then
+    echo "  ${item#"$APP"/}: $found strings contain a path under $HOME"
+    LEAKS=1
+  fi
+done < <(find "$APP/Contents/MacOS" "$APP/Contents/Frameworks" -type f -print0)
+if [[ "$LEAKS" == "1" && "${ALLOW_BUILD_PATHS:-0}" != "1" ]]; then
+  fail "the app embeds paths from this Mac (see above); fix the path remapping in bridge/build-core.sh and
+       bridge/bundle-app.sh, or set ALLOW_BUILD_PATHS=1 for a build that will not be published"
+fi
+[[ "$LEAKS" == "1" ]] || echo "none"
 
 step "Verifying the signature"
 codesign --verify --deep --strict --verbose=2 "$APP"

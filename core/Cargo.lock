@@ -1946,6 +1946,7 @@ version = "0.17.0"
 source = "git+https://github.com/Devolutions/IronRDP?rev=0a79fd2178c79b3d8920b6e76f2a9da5db6331ca#0a79fd2178c79b3d8920b6e76f2a9da5db6331ca"
 dependencies = [
  "ironrdp-acceptor",
+ "ironrdp-cliprdr",
  "ironrdp-connector",
  "ironrdp-core",
  "ironrdp-displaycontrol",
@@ -2259,6 +2260,7 @@ dependencies = [
  "ironrdp-displaycontrol",
  "ironrdp-dvc",
  "ironrdp-echo",
+ "ironrdp-egfx",
  "ironrdp-error",
  "ironrdp-graphics",
  "ironrdp-pdu",
@@ -4684,6 +4686,8 @@ dependencies = [
  "bytes",
  "chacha20poly1305",
  "ironrdp",
+ "ironrdp-egfx",
+ "ironrdp-server",
  "ironrdp-tls",
  "ironrdp-tokio",
  "ldap3",

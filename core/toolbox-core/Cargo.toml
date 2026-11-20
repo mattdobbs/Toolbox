@@ -42,7 +42,7 @@ required-features = ["test-support"]
 default = []
 cli = ["uniffi/cli"]
 # In-process RDP server for tests and the `rdp_server` example.
-test-support = ["ironrdp/server", "ironrdp/acceptor", "dep:rcgen", "dep:async-trait", "dep:tempfile", "dep:libunftp", "dep:unftp-sbe-fs", "dep:unftp-core"]
+test-support = ["ironrdp/server", "ironrdp/acceptor", "dep:ironrdp-server", "dep:rcgen", "dep:async-trait", "dep:tempfile", "dep:libunftp", "dep:unftp-sbe-fs", "dep:unftp-core"]
 
 [dependencies]
 uniffi = { version = "0.32", features = ["tokio"] }
@@ -62,7 +62,14 @@ rand = "0.10"
 # IronRDP is pinned to one git commit: the published crates come from two
 # release generations that cannot be mixed, and the server used by the tests
 # is not on crates.io yet.
-ironrdp = { git = "https://github.com/Devolutions/IronRDP", rev = "0a79fd2178c79b3d8920b6e76f2a9da5db6331ca", features = ["connector", "session", "graphics", "input", "svc", "dvc", "displaycontrol", "pdu", "core"] }
+ironrdp = { git = "https://github.com/Devolutions/IronRDP", rev = "0a79fd2178c79b3d8920b6e76f2a9da5db6331ca", features = ["connector", "session", "graphics", "input", "svc", "dvc", "displaycontrol", "cliprdr", "pdu", "core"] }
+# The graphics pipeline (H.264, RemoteFX Progressive, ClearCodec); the meta
+# crate does not re-export it. H.264 is decoded by VideoToolbox (rdp_h264.rs),
+# so none of its OpenH264 features are enabled.
+ironrdp-egfx = { git = "https://github.com/Devolutions/IronRDP", rev = "0a79fd2178c79b3d8920b6e76f2a9da5db6331ca" }
+# Only to switch on the test server's graphics pipeline; `ironrdp/server`
+# is the same crate.
+ironrdp-server = { git = "https://github.com/Devolutions/IronRDP", rev = "0a79fd2178c79b3d8920b6e76f2a9da5db6331ca", features = ["egfx"], optional = true }
 ironrdp-tokio = { git = "https://github.com/Devolutions/IronRDP", rev = "0a79fd2178c79b3d8920b6e76f2a9da5db6331ca", features = ["reqwest-native-tls"] }
 ironrdp-tls = { git = "https://github.com/Devolutions/IronRDP", rev = "0a79fd2178c79b3d8920b6e76f2a9da5db6331ca", features = ["native-tls"] }
 x509-cert = { version = "0.3", default-features = false, features = ["std"] }

@@ -17,6 +17,12 @@ if [[ -d "$XCODE_PLUGINS" ]]; then
   SWIFT_FLAGS+=(-Xswiftc -plugin-path -Xswiftc "$XCODE_PLUGINS")
 fi
 
+# A release must not name this Mac: `#file` in Swift (and in the packages
+# built with it) would otherwise carry the checkout's path into the binary.
+if [[ "$CONFIG" == "release" ]]; then
+  SWIFT_FLAGS+=(-Xswiftc -file-prefix-map -Xswiftc "$ROOT=/toolbox" -Xcc "-ffile-prefix-map=$ROOT=/toolbox")
+fi
+
 # Code signing. The Keychain remembers "Always Allow" per code signature and
 # an ad-hoc signature changes with every build, so prefer a real identity:
 #   TOOLBOX_SIGN_IDENTITY=<name or SHA-1>   explicit choice
@@ -89,6 +95,8 @@ done
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/Toolbox" 2>/dev/null || true
 cp "$ROOT/App/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
+# Shown when macOS asks whether the app may read a protected folder.
+FILES_PURPOSE="Toolbox reads files here only when you paste them into a remote desktop or transfer them to a server."
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -109,6 +117,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>NSSupportsAutomaticTermination</key><false/>
   <key>NSSupportsSuddenTermination</key><false/>
+  <key>NSDesktopFolderUsageDescription</key><string>$FILES_PURPOSE</string>
+  <key>NSDocumentsFolderUsageDescription</key><string>$FILES_PURPOSE</string>
+  <key>NSDownloadsFolderUsageDescription</key><string>$FILES_PURPOSE</string>
+  <key>NSRemovableVolumesUsageDescription</key><string>$FILES_PURPOSE</string>
+  <key>NSNetworkVolumesUsageDescription</key><string>$FILES_PURPOSE</string>
 </dict>
 </plist>
 PLIST

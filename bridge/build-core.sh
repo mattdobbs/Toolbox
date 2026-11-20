@@ -36,16 +36,28 @@ if [[ "$PROFILE" == "release" ]]; then
   PROFILE_FLAG=(--release)
 fi
 
+# The library that ships must not name this Mac: Rust records the source
+# path of every crate for panic messages, and those sit under the home
+# folder. Release builds rewrite them. Debug builds are left alone, since
+# they share target/debug with `cargo test` and different flags would make
+# the two rebuild each other's work. bridge/release.sh checks the result.
+LIBRARY_RUSTFLAGS="${RUSTFLAGS:-}"
+if [[ "$PROFILE" == "release" ]]; then
+  CARGO_DIR="${CARGO_HOME:-$HOME/.cargo}"
+  # rustc applies the last mapping that matches, so the general one goes first.
+  LIBRARY_RUSTFLAGS+=" --remap-path-prefix=$HOME=/home --remap-path-prefix=$CARGO_DIR=/cargo --remap-path-prefix=$ROOT=/toolbox"
+fi
+
 cd "$CORE"
 LIBS=()
 for t in "${TARGETS[@]}"; do
   if [[ "$t" == "$HOST_TRIPLE" ]]; then
-    cargo build -p toolbox-core "${PROFILE_FLAG[@]}"
+    RUSTFLAGS="$LIBRARY_RUSTFLAGS" cargo build -p toolbox-core "${PROFILE_FLAG[@]}"
     LIBS+=("$CORE/target/$PROFILE/libtoolbox_core.a")
     DYLIB="$CORE/target/$PROFILE/libtoolbox_core.dylib"
   else
     rustup target add "$t" >/dev/null 2>&1 || true
-    cargo build -p toolbox-core "${PROFILE_FLAG[@]}" --target "$t"
+    RUSTFLAGS="$LIBRARY_RUSTFLAGS" cargo build -p toolbox-core "${PROFILE_FLAG[@]}" --target "$t"
     LIBS+=("$CORE/target/$t/$PROFILE/libtoolbox_core.a")
   fi
 done

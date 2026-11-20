@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # Starts or stops the local test servers the fixture points at:
 #   SSH + SFTP echo server on 127.0.0.1:2222 (demo / secret; any public key)
-#   IronRDP test server   on 127.0.0.1:3390 (demo / secret)
+#   IronRDP test server   on 127.0.0.1:3390 (demo / secret): graphics
+#                         pipeline with an H.264 picture, pastes whatever
+#                         the client announces on its clipboard
 #   FTP server            on 127.0.0.1:2121 (demo / secret)
 #   FTPS (explicit TLS)   on 127.0.0.1:2122 (demo / secret, self-signed)
 #
 #   tools/e2e/servers.sh start [fixture-dir] [--exit-after <secs>]
 #   tools/e2e/servers.sh stop
 # --exit-after makes shells log out on their own (automatic pane close).
+# RDP_SERVER_ARGS replaces the RDP server's options, e.g.
+#   RDP_SERVER_ARGS="--copy-text hello"   plain updates, copies on its side
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -30,7 +34,8 @@ case "${1:-}" in
     echo "Toolbox test FTP server" > "$DIR/ftp-root/readme.txt"
     echo "nested file" > "$DIR/ftp-root/docs/notes.txt"
     nohup "$BIN/echo_server" --key "$DIR/host_key" --port 2222 "$@" > "$DIR/echo_server.log" 2>&1 &
-    nohup "$BIN/rdp_server" > "$DIR/rdp_server.log" 2>&1 &
+    read -r -a RDP_ARGS <<<"${RDP_SERVER_ARGS:---graphics-pipeline --paste}"
+    nohup "$BIN/rdp_server" "${RDP_ARGS[@]}" > "$DIR/rdp_server.log" 2>&1 &
     nohup "$BIN/ftp_server" --port 2121 --root "$DIR/ftp-root" > "$DIR/ftp_server.log" 2>&1 &
     nohup "$BIN/ftp_server" --port 2122 --root "$DIR/ftp-root" --tls > "$DIR/ftps_server.log" 2>&1 &
     up() { nc -z -w 1 127.0.0.1 "$1" 2>/dev/null && echo up || echo DOWN; }

@@ -410,18 +410,7 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         sortChildren(library)
         if !filter.isEmpty { prune(library) }
 
-        let allConnections = node("group:connections", .group("All Connections"))
-        for c in model.connections.sorted(by: { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending })
-        where matches([c.name, c.host, c.username]) {
-            attach(node("all-conn:\(c.id)", .connection(c)), to: allConnections)
-        }
-        let allCredentials = node("group:credentials", .group("All Credentials"))
-        for c in model.credentials.sorted(by: { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending })
-        where matches([c.name, c.username]) {
-            attach(node("all-cred:\(c.id)", .credential(c)), to: allCredentials)
-        }
-
-        roots = [library, allConnections, allCredentials]
+        roots = [library]
         outline.reloadData()
 
         if !filter.isEmpty {
@@ -429,10 +418,6 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         } else if !didInitialExpand {
             didInitialExpand = true
             outline.expandItem(library, expandChildren: expandAllOnLoad)
-            if expandAllOnLoad {
-                outline.expandItem(allConnections)
-                outline.expandItem(allCredentials)
-            }
         }
         // Restore selection by id.
         var rows = IndexSet()

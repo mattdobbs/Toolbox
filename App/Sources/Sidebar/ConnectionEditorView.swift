@@ -173,49 +173,6 @@ struct ConnectionDraft {
     }
 }
 
-/// Picker over the credentials, grouped by where their secret lives.
-struct CredentialPicker: View {
-    let title: String
-    let credentials: [Credential]
-    @Binding var selection: String?
-    var noneLabel = "Choose…"
-
-    var body: some View {
-        Picker(title, selection: $selection) {
-            Text(noneLabel).tag(String?.none)
-            section("Vault") { if case .vault = $0.kind { return true }; return false }
-            section("1Password") { if case .onePassword = $0.kind { return true }; return false }
-            section("Ask each time") { if case .prompt = $0.kind { return true }; return false }
-        }
-    }
-
-    /// "Name (username)", or whichever of the two exists, so items without
-    /// a title still read as something.
-    static func label(_ credential: Credential) -> String {
-        let name = credential.name.trimmingCharacters(in: .whitespaces)
-        let user = credential.username.trimmingCharacters(in: .whitespaces)
-        switch (name.isEmpty, user.isEmpty) {
-        case (false, false): return name == user ? name : "\(name) (\(user))"
-        case (false, true): return name
-        case (true, false): return user
-        case (true, true): return "Untitled credential"
-        }
-    }
-
-    @ViewBuilder
-    private func section(_ name: String, _ belongs: (Credential) -> Bool) -> some View {
-        let items = credentials.filter(belongs)
-            .sorted { Self.label($0).localizedCaseInsensitiveCompare(Self.label($1)) == .orderedAscending }
-        if !items.isEmpty {
-            Section(name) {
-                ForEach(items) { credential in
-                    Text(Self.label(credential)).tag(Optional(credential.id))
-                }
-            }
-        }
-    }
-}
-
 struct ConnectionEditorView: View {
     @ObservedObject var model: AppModel
     @State var draft: ConnectionDraft

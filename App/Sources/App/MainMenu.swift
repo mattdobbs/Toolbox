@@ -59,6 +59,9 @@ enum MainMenu {
         let themeItem = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
         themeItem.submenu = themeMenu()
         view.addItem(themeItem)
+        let remoteItem = NSMenuItem(title: "Remote Desktop", action: nil, keyEquivalent: "")
+        remoteItem.submenu = remoteDesktopMenu()
+        view.addItem(remoteItem)
         view.addItem(.separator())
         view.addItem(withTitle: "Make Text Bigger", action: #selector(AppDelegate.increaseFontSize(_:)), keyEquivalent: "+")
         view.addItem(withTitle: "Make Text Smaller", action: #selector(AppDelegate.decreaseFontSize(_:)), keyEquivalent: "-")
@@ -99,6 +102,27 @@ enum MainMenu {
         NSApp.helpMenu = help
 
         NSApp.mainMenu = main
+    }
+
+    /// Switches for every RDP connection. Resolution applies at once; the
+    /// other two when a session connects.
+    private static func remoteDesktopMenu() -> NSMenu {
+        let menu = NSMenu(title: "Remote Desktop")
+        let items: [(String, String, String)] = [
+            ("Retina Resolution", RdpPreferences.retinaKey,
+             "Off asks for a desktop with a quarter of the pixels, scaled up: faster, less sharp."),
+            ("Fast Graphics", RdpPreferences.fastGraphicsKey,
+             "H.264 and RemoteFX when the host offers them. Switch off for a host that misbehaves; applies when connecting."),
+            ("Share Clipboard", RdpPreferences.clipboardKey,
+             "Copy and paste text, and paste files from this Mac, in remote desktops. Applies when connecting."),
+        ]
+        for (title, key, help) in items {
+            let item = menu.addItem(withTitle: title, action: #selector(AppDelegate.toggleRemoteDesktopPreference(_:)),
+                                    keyEquivalent: "")
+            item.representedObject = key
+            item.toolTip = help
+        }
+        return menu
     }
 
     private static func themeMenu() -> NSMenu {

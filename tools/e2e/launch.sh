@@ -4,8 +4,12 @@
 #   tools/e2e/launch.sh [--fixture dir] [app args…]
 #   tools/e2e/launch.sh --connect echo --connect echo-1p
 # App args: --connect <id>, --files <id> (repeatable), --expand-all,
-# --demo-move, --demo-close, --edit-connection <id|new>, --edit-provider <id|new>,
-# --set-folder-credential <path>, --unlock-vault.
+# --demo-move, --demo-close, --demo-split, --edit-connection <id|new>,
+# --edit-provider <id|new>, --set-folder-credential <path>, --unlock-vault,
+# --snapshot <dir> [--snapshot-after <secs>], --assume-keyboard,
+# -demoCredentialSearch <text>.
+# This quits any Toolbox that is running. To leave one alone, start a second
+# instance by hand: open -n build/Toolbox.app --env … --args … (see below).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

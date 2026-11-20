@@ -12,6 +12,9 @@ pub mod ftp;
 pub mod ftp_test_server;
 pub mod onepassword;
 pub mod rdp;
+mod rdp_clipboard;
+mod rdp_h264;
+mod rdp_surface;
 #[cfg(feature = "test-support")]
 pub mod rdp_test_server;
 pub mod runtime;

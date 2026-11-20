@@ -8,23 +8,24 @@ right). Swift for the app, Rust for the connection engine.
 ## Download
 
 The latest signed and notarized build is on the
-[Releases page](https://github.com/mattdobbs/Toolbox/releases/latest):
+[Releases page](https://github.com/tacticalbadger/Toolbox/releases/latest):
 download the `.dmg`, open it and drag Toolbox to Applications. It needs a
-Mac with Apple silicon running macOS 14 or newer. The repository is
-private, so the link works for people who have been given access to it.
+Mac with Apple silicon running macOS 14 or newer.
 
 ## Layout
 
 ```
-core/     Rust crate toolbox-core: SSH (russh), SFTP, RDP (IronRDP), the vault,
-          1Password and Active Directory providers, the connection store.
-          Exposed to Swift through UniFFI.
+core/     Rust crate toolbox-core: SSH (russh), SFTP, FTP, RDP (IronRDP, with
+          H.264 decoded by VideoToolbox), the vault, 1Password and Active
+          Directory providers, the connection store. Exposed to Swift
+          through UniFFI.
 bridge/   Build scripts: compile the core and generate Swift bindings
           (build-core.sh), bundle the app (bundle-app.sh), local code-signing
           identity (signing-identity.sh), icon rendering.
 App/      SwiftPM package (and an optional XcodeGen project.yml). AppKit
           shell, SwiftUI for forms, SwiftTerm for terminals, RoyalVNCKit for VNC.
-tools/e2e Throwaway fixture, local test servers and screenshot helpers.
+tools/    e2e/: throwaway fixture, local test servers and screenshot helpers.
+          make-h264-fixture.swift regenerates the H.264 test stream.
 docs/     Security review and Royal TS reference material.
 ```
 
@@ -63,7 +64,7 @@ Optional:
 ## Build on a fresh Mac
 
 ```sh
-git clone https://github.com/mattdobbs/Toolbox.git && cd Toolbox
+git clone https://github.com/tacticalbadger/Toolbox.git && cd Toolbox
 make core      # first run downloads and compiles the Rust crates (several minutes)
 make app       # first run resolves the Swift packages; produces build/Toolbox.app
 make signing   # once per Mac; asks for your login password (see below)
@@ -191,13 +192,14 @@ to Unlock Vault.
 - A sidebar tree like Royal TS: folders you create (nest them with `/`),
   providers as folders in place with what they generate underneath (an
   Active Directory provider shows its OU hierarchy), drag and drop between
-  folders, context menus on every node, and flat "All Connections" and "All
-  Credentials" lists at the bottom. Expansion is remembered.
+  folders, and context menus on every node. The filter field above it
+  narrows the whole tree. Expansion is remembered.
 - Credentials: username plus password or SSH key, kept encrypted in a local
   vault (key in the login Keychain, unlocked with Touch ID), fetched from
   1Password at connect time, or prompted for. A connection can pick an
   existing credential (the picker groups vault, 1Password and ask-each-time
-  entries), carry its own username and password (stored in the vault just
+  entries and has a search field: type part of a name, username or folder
+  and everything else is hidden), carry its own username and password (stored in the vault just
   for that connection; the username lives under the method, not on the
   connection), or use its folder's credential: right-click a folder
   and choose Set Credential… and every connection underneath set to "Use the
@@ -212,11 +214,27 @@ to Unlock Vault.
   which is kept in the vault as a credential inside the provider's folder.
   Providers refresh at launch and on a timer, or on demand with ⌘R.
 
-- RDP through IronRDP: NLA logon, the desktop follows the pane size through
-  Display Control (falling back to a reconnect at the new size), frames land
-  in an IOSurface-backed layer, full keyboard and mouse The requested
+- RDP through IronRDP: NLA logon, full keyboard and mouse. Graphics come
+  over the graphics pipeline when the host offers it (H.264 decoded by
+  VideoToolbox, RemoteFX Progressive, ClearCodec), RemoteFX otherwise, and
+  the core paints straight into the surface the pane displays. The desktop
+  follows the pane size through Display Control (falling back to a
+  reconnect at the new size): the picture is scaled while a window is
+  dragged, the new size is asked for when the drag ends, and the old
+  picture stays up until the new desktop has been painted. The requested
   size is the pane's pixel size with the width rounded down to a multiple
   of 4, which every server accepts.
+- The clipboard is shared with remote desktops: text in both directions,
+  and files and folders copied on the Mac can be pasted on the remote
+  desktop (copy in Finder, paste in the remote Explorer). The Mac's
+  clipboard is announced to a remote desktop only while its pane has the
+  keyboard; see `docs/SECURITY-REVIEW.md` for exactly what a host can and
+  cannot get at.
+- View ▸ Remote Desktop has three switches for every RDP connection:
+  Retina Resolution (off asks for a desktop with a quarter of the pixels
+  and scales it up: less sharp, less to encode, send and decode), Fast
+  Graphics (off goes back to plain bitmap updates for a host
+  that misbehaves with the newer codecs) and Share Clipboard.
 - VNC through RoyalVNCKit, the engine Royal TS itself ships.
 - File Transfer connections (Type ▸ File Transfer) over SFTP, FTP over TLS
   (explicit FTPS) or plain FTP, opening a file browser: navigate, upload,
@@ -228,16 +246,18 @@ to Unlock Vault.
 ## Trying it without real hosts
 
 `tools/e2e/` packages the throwaway setup used for end-to-end checks:
-`make-fixture.sh` (keys, known_hosts, fake `op`, store), `servers.sh start`
-(echo SSH+SFTP on 2222, RDP on 3390), `launch.sh --connect echo` and
-`capture.sh` for screenshots. `CLAUDE.md` holds the working notes, machine
+`make-fixture.sh` (keys, known_hosts, fake `op` with a few dozen logins,
+store), `servers.sh start` (echo SSH+SFTP on 2222, RDP on 3390 with the
+graphics pipeline and a clipboard that pastes whatever the app announces,
+FTP on 2121, FTPS on 2122), `launch.sh --connect echo` and `capture.sh`
+for screenshots. `CLAUDE.md` holds the working notes, machine
 setup and current state for whoever (or whatever) picks the project up.
 
 ```sh
 cd core
 cargo run --example echo_server --features test-support -- --key <openssh-private-key>   # SSH + SFTP on 127.0.0.1:2222, demo / secret
                                                        # add --exit-after <secs> to have shells log out on their own
-cargo run --example rdp_server --features test-support                                   # RDP on 127.0.0.1:3390, demo / secret
+cargo run --example rdp_server --features test-support -- [--graphics-pipeline] [--paste] [--copy-text <text>]   # RDP on 127.0.0.1:3390, demo / secret
 cargo run --example ftp_server --features test-support -- --port 2121 [--tls]            # FTP or FTPS, demo / secret
 ```
 
@@ -246,8 +266,14 @@ Launch overrides for a throwaway setup: `TOOLBOX_STORE_PATH`,
 connection on start, `--files <id>` to open its SFTP browser (both may repeat, each
 opening another pane), `--expand-all` to expand the whole sidebar tree, `--demo-move` to move the
 focused pane into a new workspace after launch, `--demo-close` to close the focused pane after launch,
+`--demo-split` to split it (which resizes what is in it),
 `--edit-connection <id|new>` and
-`--set-folder-credential <path>` to open those sheets at launch, `--unlock-vault` to unlock the vault at launch and
+`--set-folder-credential <path>` to open those sheets at launch, `-demoCredentialSearch <text>` to open their
+credential pickers with a search typed, `--snapshot <dir>` (with `--snapshot-after <secs>`) to have the app save
+pictures of its own windows and remote desktops plus a `snapshot.txt` report, which works without Screen Recording
+permission and with the screen locked, `--assume-keyboard` to treat remote desktop panes as having the keyboard
+when the app cannot be frontmost (clipboard checks on a locked screen; never for normal use),
+`--unlock-vault` to unlock the vault at launch and
 log the outcome, `TOOLBOX_KEYCHAIN_SERVICE` to use a separate Keychain item for the vault key, and
 the standard defaults override `-vaultRequiresAuth NO` to skip the Touch ID step for that run.
 
@@ -256,7 +282,8 @@ the standard defaults override `-vaultRequiresAuth NO` to skip the Touch ID step
 
 ## Next
 
-Clipboard and audio for RDP, a client-side RDP pointer, per-connection RDP
+Files from a remote desktop back to the Mac and pictures on the shared
+clipboard, audio for RDP, a client-side RDP pointer, per-connection RDP
 certificate verification, session restore, broadcast input, jump hosts and
 port forwards.
 

@@ -49,6 +49,12 @@ targets:
         NSSupportsAutomaticTermination: false
         NSSupportsSuddenTermination: false
         NSHumanReadableCopyright: ""
+        # Shown when macOS asks whether the app may read a protected folder.
+        NSDesktopFolderUsageDescription: "Toolbox reads files here only when you paste them into a remote desktop or transfer them to a server."
+        NSDocumentsFolderUsageDescription: "Toolbox reads files here only when you paste them into a remote desktop or transfer them to a server."
+        NSDownloadsFolderUsageDescription: "Toolbox reads files here only when you paste them into a remote desktop or transfer them to a server."
+        NSRemovableVolumesUsageDescription: "Toolbox reads files here only when you paste them into a remote desktop or transfer them to a server."
+        NSNetworkVolumesUsageDescription: "Toolbox reads files here only when you paste them into a remote desktop or transfer them to a server."
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.dobbs.Toolbox
@@ -57,4 +63,4 @@ targets:
         # Rust core: produced by bridge/build-core.sh
         SWIFT_INCLUDE_PATHS: $(SRCROOT)/Vendor/ToolboxCoreFFI
         LIBRARY_SEARCH_PATHS: $(SRCROOT)/Vendor
-        OTHER_LDFLAGS: ["-ltoolbox_core", "-framework", "Security", "-framework", "SystemConfiguration", "-framework", "CoreFoundation"]
+        OTHER_LDFLAGS: ["-ltoolbox_core", "-framework", "Security", "-framework", "SystemConfiguration", "-framework", "CoreFoundation", "-framework", "IOSurface", "-framework", "CoreMedia", "-framework", "CoreVideo", "-framework", "VideoToolbox"]

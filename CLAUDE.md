@@ -17,7 +17,7 @@ the owner provided is in `docs/royalts-reference/`. The owner's Royal layout to
 mirror: document "Work" → folder "ACME" → dynamic folders "1Password" and the
 AD provider (OU hierarchy), folder "Jump Boxes".
 
-Repo: https://github.com/mattdobbs/Toolbox.git. **One branch: `main`.**
+Repo: https://github.com/tacticalbadger/Toolbox.git (public). **One branch: `main`.**
 The owner asked for a single branch on 2026-11-14; commit and push to `main`
 directly and do not create feature branches unless they ask. The old
 `toolbox-phases-1-3` branch was merged and deleted.
@@ -39,19 +39,27 @@ directly and do not create feature branches unless they ask. The old
 
 - `core/toolbox-core/` — Rust core (edition 2021) exposed through UniFFI
   0.32: `ssh.rs` (russh), `sftp.rs` (russh-sftp), `rdp.rs` (IronRDP,
-  git-pinned), `vault.rs` (XChaCha20-Poly1305), `onepassword.rs` (`op`
-  subprocess), `ad.rs` (ldap3), `ftp.rs` (FTP / explicit FTPS via suppaftp), `store.rs` (connections/credentials/
+  git-pinned: session loop, one thread per session), `rdp_surface.rs` (the
+  IOSurface a session paints into), `rdp_h264.rs` (H.264 through
+  VideoToolbox for the graphics pipeline), `rdp_clipboard.rs` (CLIPRDR
+  backend, file lists, file ranges), `vault.rs` (XChaCha20-Poly1305),
+  `onepassword.rs` (`op` subprocess), `ad.rs` (ldap3), `ftp.rs` (FTP /
+  explicit FTPS via suppaftp), `store.rs` (connections/credentials/
   providers/folders JSON document), `error.rs`. Test servers behind the
-  `test-support` feature: `ssh_test_server.rs`, `rdp_test_server.rs`,
-  `ftp_test_server.rs` (libunftp); examples `echo_server` (SSH+SFTP :2222),
-  `rdp_server` (:3390) and `ftp_server` (`--port`, `--tls`), all
-  demo/secret.
+  `test-support` feature: `ssh_test_server.rs`, `rdp_test_server.rs`
+  (optional graphics pipeline, scriptable clipboard), `ftp_test_server.rs`
+  (libunftp); examples `echo_server` (SSH+SFTP :2222), `rdp_server` (:3390;
+  `--graphics-pipeline`, `--paste`, `--copy-text`) and `ftp_server`
+  (`--port`, `--tls`), all demo/secret. `tests/data/quadrants.h264` is the
+  H.264 test stream; `tools/make-h264-fixture.swift` regenerates it.
 - `App/` — SwiftPM package. AppKit shell: `App/` (delegate, menu),
   `Workspace/` (window = workspace tab, `PaneContainerViewController`,
   `PaneView`, `PaneLayout`), `Terminal/` (SwiftTerm), `Remote/` (RDP via
-  IOSurface layer, VNC via RoyalVNCKit), `Files/` (SFTP browser, SwiftUI),
-  `Sidebar/` (NSOutlineView tree + SwiftUI editors), `Model/` (AppModel,
-  VaultManager, CredentialResolver, ProviderSync). `Sources/Generated/` and
+  IOSurface layer plus clipboard sharing, VNC via RoyalVNCKit), `Files/`
+  (SFTP browser, SwiftUI), `Sidebar/` (NSOutlineView tree, SwiftUI editors,
+  `CredentialPicker.swift` with the search popover), `Model/` (AppModel,
+  VaultManager, CredentialResolver, ProviderSync), `Support/`
+  (`Snapshot.swift`: the `--snapshot` aid). `Sources/Generated/` and
   `Vendor/` are produced by `make core` and gitignored.
 - `bridge/` — build scripts: `build-core.sh`, `bundle-app.sh`,
   `signing-identity.sh`, `release.sh` (`make release`), `publish.sh`
@@ -76,7 +84,7 @@ The full dependency table is in README.md ("Dependencies"). In short:
    xcodegen` (`make xcode`, needs `sudo xcodebuild -license accept`),
    `cargo install cargo-audit`, `brew install gh`.
 4. `make core` then `make app` → `build/Toolbox.app`. `make test` → Rust
-   tests (42 as of 2026-11-18). `make run` launches the bundle.
+   tests (67 as of 2026-11-20). `make run` launches the bundle.
 5. `make signing` once (asks for the login password): creates and trusts a
    self-signed "Toolbox Local Signing" certificate so the app's signature
    stays stable across builds and the Keychain's "Always Allow" for the
@@ -89,7 +97,9 @@ The full dependency table is in README.md ("Dependencies"). In short:
 App data: `~/Library/Application Support/Toolbox/{connections.json,
 vault.json}`; Keychain generic password service `com.dobbs.Toolbox.vault-key`
 ("Toolbox vault key"); UserDefaults domain `com.dobbs.Toolbox`
-(`vaultRequiresAuth`, `vaultKeyOwnerCertificate`, sidebar expansion).
+(`vaultRequiresAuth`, `vaultKeyOwnerCertificate`, sidebar expansion, and
+the View ▸ Remote Desktop switches `rdpRetinaResolution`, `rdpFastGraphics`,
+`rdpShareClipboard`, all on by default).
 The owner's real setup: `op` at `/opt/homebrew/bin/op`, account `work`, vault
 `work`; AD binds with their regular domain account.
 
@@ -116,6 +126,26 @@ tools/e2e/capture.sh                 # screenshot every Toolbox window into buil
 tools/e2e/servers.sh stop
 ```
 
+The RDP test server starts with `--graphics-pipeline --paste`: a client
+that takes the pipeline gets an H.264 picture (four coloured quadrants,
+top-left), and whatever the app announces on its clipboard is asked for,
+with sizes (never contents) logged to `build/e2e/rdp_server.log`.
+`RDP_SERVER_ARGS="--copy-text hello" tools/e2e/servers.sh start` gives a
+server without the pipeline (so RemoteFX) that copies text on its side.
+
+`launch.sh` quits any running Toolbox first. If the owner has the app open
+with real sessions, do not use it: start a second instance with `open -n`
+and the same `--env`/`--args`, and stop it by its own PID.
+
+`capture.sh` cannot work without Screen Recording permission or with the
+screen locked (`ioreg -n Root -d1 | grep IOConsoleLocked`). Use the app's
+own `--snapshot <dir>` then: it saves `window-N.png` for every visible
+window (sheets and popovers included), `desktop-N.png` for every RDP pane
+straight from its surface, and `snapshot.txt` with each pane's state.
+With the screen locked the app is never active, so nothing is announced on
+the clipboard; `--assume-keyboard` lifts that for a clipboard check. Such
+a check uses the real pasteboard: save it and put it back.
+
 Fixture ids: `echo` (key file, folder Jump Boxes), `echo-1p` (1Password
 credential through the fake `op`), `echo-folder` (folder credential →
 prompts as `folderuser`), `rdp-local`, `vnc-local`, File Transfer
@@ -128,12 +158,16 @@ uses an existing credential for domain controllers and none for others. The fixt
 
 Launch args: `--connect <id>` / `--files <id>` (repeatable), `--expand-all`,
 `--demo-move` (focused pane → new workspace), `--demo-close` (close the
-focused pane after 3 s), `--edit-connection <id|new>`,
+focused pane after 3 s), `--demo-split` (split it after 3 s, which resizes
+an RDP desktop), `--edit-connection <id|new>`,
 `--edit-provider <id|new>`, `--set-folder-credential <path>`,
 `--demo-provider-account <provider-id>` (saves a typed-in bind account,
 then switches to an existing credential, logging each step),
-`--unlock-vault`; defaults override
-`-vaultRequiresAuth NO`. Env: `TOOLBOX_STORE_PATH`, `TOOLBOX_VAULT_PATH`,
+`--snapshot <dir>` with `--snapshot-after <secs>` (default 6),
+`--assume-keyboard`, `--unlock-vault`; defaults overrides
+`-vaultRequiresAuth NO`, `-demoCredentialSearch <text>` (credential pickers
+open with that search typed), `-rdpFastGraphics NO`,
+`-rdpRetinaResolution NO`, `-rdpShareClipboard NO`. Env: `TOOLBOX_STORE_PATH`, `TOOLBOX_VAULT_PATH`,
 `TOOLBOX_KNOWN_HOSTS`, `TOOLBOX_KEYCHAIN_SERVICE`.
 
 Screenshots need Screen Recording permission for the terminal; GUI
@@ -215,6 +249,54 @@ as `Toolbox-*.ips` (JSON: header line, then body with `threads[].frames`).
   "connection lost" on Retina panes. Large frames arrive as several tiles,
   not one full-screen region. To see server-side errors in a test, add
   `tracing-subscriber` as a temporary dev-dependency and init it at DEBUG.
+- RDP graphics. With `fast_graphics` the session offers the graphics
+  pipeline (IronRDP's `GraphicsPipelineClient` on DRDYNVC, drained into the
+  framebuffer by `ActiveStage::process`) and RemoteFX; without it the
+  server is left with plain bitmap updates, which is what every version
+  before 0.3.0 did and the fallback for a host that misbehaves. A pipeline
+  resize arrives as a graphics reset that changes the image's size inside
+  `process`, with no reactivation: the loop notices by comparing sizes
+  after every PDU (`Presenter::present`). Advertise only codecs the build
+  decodes: `client_codecs_capabilities(&[])` grows with cargo features that
+  other crates switch on (the test server enables QOI), and a server sends
+  what it is told the client takes; `remotefx_only()` cuts the list back.
+  RemoteFX is lossy, so tests compare colours with a tolerance.
+- RDP frames. The session thread copies changed regions into an IOSurface
+  it creates (`FrameSurface`) and passes only the surface's ID to Swift,
+  which finds it with `IOSurfaceLookup` (works inside the process; the
+  surfaces are not global). A new desktop size means a new surface;
+  `RdpSessionView` keeps the old one on screen until the first frame of
+  the new one. `RdpBridge` counts surfaces so a refresh queued for the old
+  one cannot run ahead of the news of the next, which would leave the new
+  desktop unshown on an idle host. A layer only looks at a surface again
+  when `contents` is set anew. Set the layer's frame inside a
+  `CATransaction` with actions disabled, or it animates behind the window
+  edge on every resize step. `copy_region` remains for tests only.
+- H.264 is decoded by `VideoToolboxDecoder` (hand-written FFI to
+  VideoToolbox, CoreMedia, CoreVideo), synchronously, with no output
+  format requested so the planes hold the stream's own samples; IronRDP
+  applies the colour transform. No OpenH264 is linked, on purpose (built
+  from source it has no patent cover, and it is C++ parsing server data).
+  The frameworks are linked from `Package.swift` and `project.yml`.
+- RDP clipboard. The CLIPRDR backend only forwards events; `ClipboardSync`
+  in `rdp.rs` decides. Swift announces the pasteboard (`clipboard_offer`)
+  only while the pane has the keyboard and remembers the pasteboard's
+  change count; text is handed over only while that count is unchanged.
+  Remote text is fetched only while the pane has the keyboard. Files:
+  `initiate_file_copy` drops descriptors it dislikes, which would shift
+  every index after them, so `build_file_offer` only produces names it
+  accepts (see `windows_file_name`, the 259-unit limit). The remote names a
+  file by its position in the list it was sent, never by path. Types that
+  carry clipboard text are not `Debug`; keep it that way. A failed
+  clipboard operation is logged and never ends the session.
+- Each RDP session runs on its own thread with a current-thread runtime
+  (`toolbox-rdp`), so decoding does not stall SSH sessions on the shared
+  two-thread runtime.
+- Release builds rewrite source paths (`--remap-path-prefix` in
+  `build-core.sh`, `-file-prefix-map` in `bundle-app.sh`) and
+  `release.sh` fails if the app still contains a path under the home
+  folder. Debug builds are left alone so `make test` and `make core` do
+  not rebuild each other's artifacts.
 - Keychain access is keyed on the code signature; ad-hoc signatures change
   per build (see `make signing`). `VaultManager` re-owns the vault-key item
   when the signing certificate changes.
@@ -245,66 +327,78 @@ as `Toolbox-*.ips` (JSON: header line, then body with `threads[].frames`).
 
 ## Not verified against real infrastructure
 
-A real Windows RDP host (sign-out detection relies on the server's
-Terminate), a real VNC server, an AD domain controller, Touch ID on a
-certificate-signed build, and distribution to other Macs (needs Developer
-ID + notarization; self-signed builds need right-click → Open).
+A real Windows RDP host for anything new in 0.3.0: the graphics pipeline
+(which codecs Windows picks, whether a resize comes as a graphics reset or
+a reactivation, colours of real H.264), clipboard text, and pasting files
+into Explorer. All of it is tested against IronRDP's server only. Also a
+real VNC server and Touch ID on a certificate-signed build.
 
 ## Ideas not started
 
-RDP clipboard/audio/pointer, per-connection RDP certificate verification,
-session restore (workspaces + layouts), broadcast input, jump hosts, port
-forwards, a Tasks concept like Royal's, terminal theme picker.
+RDP: files from the remote desktop to the Mac, pictures on the clipboard,
+audio, a client-side pointer (the host's cursor shapes; today the Mac's
+arrow is all there is), ⌘C/⌘V mapped to Ctrl in a session, per-connection
+certificate verification. Elsewhere: session restore (workspaces +
+layouts), broadcast input, jump hosts, port forwards, a Tasks concept like
+Royal's, terminal theme picker. Offered to the owner and not asked for:
+LDAP hardening (plain-LDAP fallback off by default, a key-size hint in the
+error, pinning an internal root CA).
 
 ## Current state (update in every commit)
 
-As of 2026-11-19, on `main`.
+As of 2026-11-20, on `main`. **Toolbox 0.3.0.**
 
-History rewritten on 2026-11-19. The repo is public, and it was rebuilt so
-that no commit carries a personal email address, a name, or details of a
-real network. **Every commit ID changed, and the GitHub repository itself
-is a new one.** A clone made before that date still holds the old commits:
-do not pull into it, push from it or merge it. Delete it and clone again.
-In every clone, set `git config user.email` to the account's GitHub
-no-reply address before the first commit. Along the way the test servers'
-login became `demo` / `secret`, and the sample folders `ACME/...`.
+This change set, asked for by the owner in one go:
 
-Published: the owner wants downloadable DMGs on the repo. `make publish`
-(bridge/publish.sh) uploads the notarized build as GitHub Release
-`v<version>`; v0.2.0 is live with the DMG, zip and SHA256SUMS, and README
-has a Download section. Release flow: bump `VERSION`, optionally add
+- **RDP clipboard.** Text both ways; files and folders from the Mac to the
+  remote desktop. `rdp_clipboard.rs`, `ClipboardSync` in `rdp.rs`, the
+  clipboard part of `RdpSessionView`. Not done: files from the remote to
+  the Mac, pictures.
+- **RDP speed.** The owner found IronRDP slow next to Microsoft's client,
+  resizing above all, and allowed replacing it. It stayed: the slowness
+  was in how Toolbox used it. It offered the server no codec at all (plain
+  bitmap updates), copied every changed region four times on the main
+  thread, waited 300 ms after the last resize step, animated the layer
+  behind the window edge, and blanked the pane at every new size. Now:
+  graphics pipeline with H.264 through VideoToolbox, RemoteFX as fallback,
+  the core painting straight into the displayed surface from the session's
+  own thread, a resize request when the drag ends (80 ms after other
+  layout changes), and the old picture kept until the new one is painted.
+  View ▸ Remote Desktop has Retina Resolution, Fast Graphics and Share
+  Clipboard switches.
+- **Sidebar**: the "All Connections" and "All Credentials" groups are gone.
+- **Credential picker**: a popover with a search field, in the connection
+  editor, the folder credential sheet and the provider editor.
+- **Releases no longer name the build Mac**: paths are rewritten and
+  `make release` checks. The 0.2.0 download still contains them.
+- README and CLAUDE.md pointed at the old repository address; fixed.
+
+Verified: 67 Rust tests (unit tests for the decoder against a stream from
+the system encoder, the surface, file lists and ranges; 11 end-to-end RDP
+tests covering plain updates, RemoteFX, the pipeline with H.264 and a
+pipeline resize, clipboard text both ways, time-outs, files, refusals),
+clippy clean, `cargo audit` as before. In the app against the local
+servers, by `--snapshot` because the screen was locked: the pipeline
+desktop with the decoded H.264 picture, a resize through `--demo-split`,
+RemoteFX, plain updates, the picker filtering 62 credentials, the sidebar;
+and with `--assume-keyboard`, clipboard text to and from the test server
+and a file and a folder listed and read by it.
+
+**Not verified: any of it against a real Windows host**, and not the
+resize feel under a real drag (locked screen). First thing to check with
+the owner: connect to a Windows host, drag-resize, copy text both ways,
+paste a file into Explorer. If the picture is wrong or the session drops,
+View ▸ Remote Desktop ▸ Fast Graphics off is the old behaviour; the pane
+says so when a session fails. Retina Resolution off is the next lever for
+speed (a quarter of the pixels).
+
+Open questions left with the owner (from the 2026-11-19 clean-up): commit
+author fields still carry a name and the old account's no-reply address;
+the bundle identifier `com.dobbs.Toolbox`; whether to delete the 0.2.0
+release, whose binary contains build paths. A Developer ID signature
+names its holder by design.
+
+Release flow, unchanged: bump `VERSION`, add
 `docs/release-notes/<version>.md`, commit and push, `make release`,
-`make publish`. Notes are for teammates and carry no personal details.
-The repo is public, so anyone can read the code and download a release.
-
-Released: **Toolbox 0.2.0 (build 9)** was built with `make release` on the
-desktop Mac on 2026-11-18, signed with the owner's Developer ID Application
-identity, notarized (app and DMG both Accepted) and stapled. Checked
-as a recipient would get it: a quarantined copy of the DMG passes
-`spctl` ("Notarized Developer ID"), and the app run from it handled SSH,
-RDP, SFTP and the vault. Artifacts are in build/release/ on that Mac (not
-in git). This change set fixes what the first real run exposed in the
-scripts: an identity passed by SHA-1 now resolves to its name so the
-Developer ID options apply, the release checks for secure timestamps
-before contacting Apple, and everyday builds use the Developer ID without
-timestamp or hardened runtime.
-
-Also fixed in this change set: RDP sessions dropped right after resizing
-on Retina displays ("Disconnected: connection lost"). Cause: the pane asked
-for a width that was not a multiple of 4 (2114), which the server could
-not encode. Sizes now go through `rdp_desktop_size`; a regression test
-connects at 642x481 and resizes to 2114x1588. The pane also keeps the
-specific error text when a session drops, and an abrupt close reads "the
-server closed the connection unexpectedly". Verified in the app at full
-width (2112x1588) and in a split (1052x1588). 42 Rust tests, clippy clean.
-
-Done earlier and verified: SSH, SFTP/FTP/FTPS file transfer, RDP and VNC
-panes; vault with Keychain key + Touch ID; 1Password and AD providers (AD
-accounts as existing or typed-in credentials); Royal-style sidebar tree;
-draggable pane layouts; tabbed workspaces; automatic pane close;
-connection auth methods; folder credentials; stable code signing path.
-
-Pending: nothing for the desktop Mac. The laptop has had a Developer ID
-identity of its own since 2026-11-19 (a second certificate for the same
-team, made for another project), so `make app` there now signs with it.
-Making a release on the laptop still needs the `toolbox-notary` profile.
+`make publish`. The owner installs from the Releases page; nothing needs
+to stay in `build/`.
