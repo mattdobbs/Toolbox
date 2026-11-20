@@ -346,7 +346,13 @@ error, pinning an internal root CA).
 
 ## Current state (update in every commit)
 
-As of 2026-11-20, on `main`. **Toolbox 0.3.0.**
+As of 2026-11-20, on `main`. **Toolbox 0.3.0 (build 13) is published** as
+GitHub Release `v0.3.0`: built with `make release` on the desktop Mac,
+notarized (app and disk image), and checked from a quarantined copy of the
+DMG: accepted by Gatekeeper, no entitlements, no paths from the build Mac,
+and an RDP session with H.264 running under the hardened runtime against
+the local test server. `build/` was removed on that Mac afterwards at the
+owner's request; they install from the Releases page.
 
 This change set, asked for by the owner in one go:
 
